@@ -889,6 +889,10 @@ pub async fn refresh_provider_balance(
         // Explicit user sync re-checks the subscription tier instead of reusing the 6h cache.
         tokvane_collectors::providers::claude_cli::invalidate_claude_auth_cache();
     }
+    if trimmed_provider.eq_ignore_ascii_case("antigravity") {
+        // Explicit user sync retries immediately instead of waiting out the failure backoff.
+        tokvane_collectors::providers::antigravity::reset_agy_probe_backoff();
+    }
     let outcome = collect_provider_balance(&state.storage, &provider_id, state.credentials.as_ref())
         .await
         .map_err(IpcError::from)?;

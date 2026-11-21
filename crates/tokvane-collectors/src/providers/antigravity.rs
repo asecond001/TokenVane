@@ -1,6 +1,7 @@
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use chrono::DateTime;
@@ -529,7 +530,88 @@ pub fn parse_antigravity_cli_usage_output(
     Ok((snapshot, windows))
 }
 
+// ---------------------------------------------------------------------------------------------
+// `agy` probe guard
+//
+// When `agy -p /usage` cannot refresh its Google OAuth token silently (offline, DNS failure,
+// broken proxy), the CLI falls back to an *interactive* OAuth flow and opens the system browser
+// on the Google sign-in page. Probing repeatedly in that state pops a browser window (stealing
+// focus from full-screen apps) on every poll. Two guards prevent that:
+//   1. a cheap reachability check of Google's OAuth host before every spawn, and
+//   2. an exponential backoff after any failed probe, reset by success or an explicit user sync.
+// ---------------------------------------------------------------------------------------------
+
+/// Public OAuth host the `agy` CLI must reach to refresh its token silently.
+const AGY_AUTH_REACHABILITY_URL: &str = "https://oauth2.googleapis.com/";
+const AGY_BACKOFF_BASE: Duration = Duration::from_secs(30 * 60);
+const AGY_BACKOFF_MAX: Duration = Duration::from_secs(6 * 3_600);
+
+#[derive(Debug, Default)]
+struct AgyProbeBackoff {
+    consecutive_failures: u32,
+    retry_after: Option<std::time::Instant>,
+}
+
+static AGY_BACKOFF: Mutex<AgyProbeBackoff> = Mutex::new(AgyProbeBackoff {
+    consecutive_failures: 0,
+    retry_after: None,
+});
+
+/// Backoff applied after `failures` consecutive failed `agy` probes (30 min doubling, 6 h cap).
+pub(crate) fn agy_backoff_delay(failures: u32) -> Duration {
+    if failures == 0 {
+        return Duration::ZERO;
+    }
+    let factor = 1u32
+        .checked_shl(failures.saturating_sub(1).min(16))
+        .unwrap_or(u32::MAX);
+    AGY_BACKOFF_BASE
+        .checked_mul(factor)
+        .map_or(AGY_BACKOFF_MAX, |d| d.min(AGY_BACKOFF_MAX))
+}
+
+/// Clear the failure backoff so the next probe runs immediately (explicit user sync).
+pub fn reset_agy_probe_backoff() {
+    if let Ok(mut guard) = AGY_BACKOFF.lock() {
+        *guard = AgyProbeBackoff::default();
+    }
+}
+
+fn agy_backoff_remaining() -> Option<Duration> {
+    let guard = AGY_BACKOFF.lock().ok()?;
+    let until = guard.retry_after?;
+    until.checked_duration_since(std::time::Instant::now())
+}
+
+fn record_agy_probe_result(success: bool) {
+    if let Ok(mut guard) = AGY_BACKOFF.lock() {
+        if success {
+            *guard = AgyProbeBackoff::default();
+        } else {
+            guard.consecutive_failures = guard.consecutive_failures.saturating_add(1);
+            guard.retry_after =
+                Some(std::time::Instant::now() + agy_backoff_delay(guard.consecutive_failures));
+        }
+    }
+}
+
+/// Whether Google's OAuth host answers at all (any HTTP status counts). No credentials are sent.
+async fn agy_auth_host_reachable() -> bool {
+    let Ok(client) = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(4))
+        .timeout(Duration::from_secs(6))
+        .user_agent(concat!("TokenVane/", env!("CARGO_PKG_VERSION")))
+        .build()
+    else {
+        return false;
+    };
+    client.get(AGY_AUTH_REACHABILITY_URL).send().await.is_ok()
+}
+
 /// Non-interactively invoke the documented official Antigravity CLI (`agy -p "/usage" --output-format json`).
+///
+/// Guarded so a degraded network never makes `agy` open its interactive browser sign-in: the
+/// probe is skipped while Google's OAuth host is unreachable or while a failure backoff is active.
 pub async fn collect_antigravity_cli_usage(
     now_ms: i64,
 ) -> CollectorResult<(ProviderBalanceSnapshot, Vec<ObservedRateLimitWindow>)> {
@@ -539,6 +621,27 @@ pub async fn collect_antigravity_cli_usage(
         )
     })?;
 
+    if let Some(remaining) = agy_backoff_remaining() {
+        let minutes = remaining.as_secs().div_ceil(60).max(1);
+        return Err(CollectorError::Compliance(format!(
+            "agy 配额同步退避中，约 {minutes} 分钟后自动重试，可点击同步立即重试"
+        )));
+    }
+    if !agy_auth_host_reachable().await {
+        return Err(CollectorError::Compliance(
+            "网络待恢复，agy 配额将在 Google 认证服务连通后自动同步".to_string(),
+        ));
+    }
+
+    let result = collect_antigravity_cli_usage_from(bin_path, now_ms).await;
+    record_agy_probe_result(result.is_ok());
+    result
+}
+
+async fn collect_antigravity_cli_usage_from(
+    bin_path: PathBuf,
+    now_ms: i64,
+) -> CollectorResult<(ProviderBalanceSnapshot, Vec<ObservedRateLimitWindow>)> {
     let raw_output = tokio::task::spawn_blocking(move || run_agy_cli_blocking(&bin_path))
         .await
         .map_err(|e| CollectorError::Compliance(format!("执行 agy CLI 后台任务异常: {e}")))??;
@@ -1185,6 +1288,17 @@ impl ProviderLogParser for AntigravityParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agy_probe_backoff_doubles_from_thirty_minutes_and_caps_at_six_hours() {
+        assert_eq!(agy_backoff_delay(0), Duration::ZERO);
+        assert_eq!(agy_backoff_delay(1), Duration::from_secs(30 * 60));
+        assert_eq!(agy_backoff_delay(2), Duration::from_secs(60 * 60));
+        assert_eq!(agy_backoff_delay(3), Duration::from_secs(120 * 60));
+        assert_eq!(agy_backoff_delay(4), Duration::from_secs(240 * 60));
+        assert_eq!(agy_backoff_delay(5), Duration::from_secs(6 * 3_600));
+        assert_eq!(agy_backoff_delay(u32::MAX), Duration::from_secs(6 * 3_600));
+    }
 
     #[test]
     fn extracts_model_selection_preserving_version_dots_and_ignoring_plain_text() {

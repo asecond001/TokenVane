@@ -168,6 +168,11 @@ fn run_claude_cli_blocking(
     cmd.args(args)
         .current_dir(cwd)
         .env("CLAUDE_CODE_SKIP_PROMPT_HISTORY", "1")
+        // Documented Claude Code switches: a read-only probe must never self-update the user's CLI
+        // or start telemetry/error-reporting helpers, which also keeps background helper
+        // processes (and any console windows they might create) to a minimum.
+        .env("DISABLE_AUTOUPDATER", "1")
+        .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
