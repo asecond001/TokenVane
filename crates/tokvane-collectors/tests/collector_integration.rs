@@ -1960,5 +1960,70 @@ async fn antigravity_cli_quota_refresh_persists_pools_and_honors_cooldown() {
     assert!(cached.from_cache);
     assert_eq!(cached.cooldown_remaining_secs, 50);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    // Auth failure persists cli_auth_paused_reason in SQLite and blocks future runs until cleared
+    let err = refresh_antigravity_cli_quota_with_runner(&storage, now_ms + 70_000, true, || {
+        calls.fetch_add(1, Ordering::SeqCst);
+        async {
+            Err(tokvane_collectors::CollectorError::Compliance(
+                "agy CLI 返回状态 ERROR: Not signed in".to_string(),
+            ))
+        }
+    })
+    .await
+    .expect_err("auth error fails");
+    assert!(err.to_string().contains("Not signed in"));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(storage
+        .get_cli_auth_paused_reason(provider_ids::ANTIGRAVITY)
+        .expect("query pause")
+        .is_some());
+
+    // Subsequent attempt short-circuits before invoking runner
+    let skipped = refresh_antigravity_cli_quota_with_runner(&storage, now_ms + 140_000, true, || {
+        calls.fetch_add(1, Ordering::SeqCst);
+        async { unreachable!("must skip while cli_auth_paused_reason is set") }
+    })
+    .await
+    .expect_err("paused probe short-circuits");
+    assert!(skipped.to_string().contains("Not signed in"));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    // Clearing the persisted pause (manual sync/login) resumes probing and succeeds
+    storage
+        .set_cli_auth_paused_reason(provider_ids::ANTIGRAVITY, None)
+        .expect("clear pause");
+    let resumed = refresh_antigravity_cli_quota_with_runner(&storage, now_ms + 200_000, true, || {
+        calls.fetch_add(1, Ordering::SeqCst);
+        async move {
+            let sample = r#"{
+              "status": "SUCCESS",
+              "command": {
+                "name": "usage",
+                "data": {
+                  "groups": [
+                    {
+                      "name": "Gemini Models",
+                      "buckets": [
+                        {"id": "gemini-5h", "window": "5h", "remaining_fraction": 0.8, "reset_time": "2026-11-16T17:13:50Z"}
+                      ]
+                    }
+                  ]
+                }
+              }
+            }"#;
+            parse_antigravity_cli_usage_output(sample, now_ms + 200_000, None)
+        }
+    })
+    .await
+    .expect("resumed refresh succeeds");
+    assert_eq!(resumed.rate_limits_updated, 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        storage
+            .get_cli_auth_paused_reason(provider_ids::ANTIGRAVITY)
+            .expect("cleared after success"),
+        None
+    );
 }
 

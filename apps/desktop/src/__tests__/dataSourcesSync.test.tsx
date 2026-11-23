@@ -698,6 +698,29 @@ describe('v0.3.0 Analytics Differentiation, Sync Pairing QR, TZ & UX Fixes', () 
     expect(screen.getByLabelText('悬浮窗不透明度')).toBeInTheDocument();
   });
 
+  it('defaults background_cli_quota_poll to on in PreferencesPage and persists opt-out toggle', async () => {
+    const prefs = makePreferences({ background_cli_quota_poll: true });
+    vi.spyOn(ipc, 'getPreferences').mockResolvedValue(prefs);
+    vi.spyOn(ipc, 'getBootstrapState').mockResolvedValue(makeBootstrap(prefs));
+    const updateSpy = vi
+      .spyOn(ipc, 'updatePreferences')
+      .mockImplementation(async (next) => next);
+
+    renderWithQuery(<PreferencesPage />);
+
+    const toggle = (await screen.findByLabelText(
+      '后台自动调用官方 CLI 刷新配额（Antigravity / Claude Code）'
+    )) as HTMLInputElement;
+    expect(toggle.checked).toBe(true);
+
+    fireEvent.click(toggle);
+    await waitFor(() => {
+      expect(updateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ background_cli_quota_poll: false })
+      );
+    });
+  });
+
   it('supports specialized analytics modes in TrendsPage, MonthlyPage, ModelsPricingPage & SpeedLatencyPage', async () => {
     vi.spyOn(ipc, 'getTrends').mockResolvedValue(makeTrendsReport());
     renderWithQuery(<TrendsPage />);

@@ -91,6 +91,43 @@ impl Storage {
         })
     }
 
+    pub fn get_cli_auth_paused_reason(&self, provider_id: &str) -> CoreResult<Option<String>> {
+        self.with_conn(|conn| {
+            let raw: Option<Option<String>> = conn
+                .query_row(
+                    "SELECT cli_auth_paused_reason FROM provider_configs WHERE provider_id = ?1",
+                    params![provider_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            Ok(raw
+                .flatten()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()))
+        })
+    }
+
+    pub fn set_cli_auth_paused_reason(
+        &self,
+        provider_id: &str,
+        reason: Option<&str>,
+    ) -> CoreResult<()> {
+        let now_ms = Utc::now().timestamp_millis();
+        let cleaned = reason.map(str::trim).filter(|s| !s.is_empty());
+        self.with_conn(|conn| {
+            conn.execute(
+                r#"
+                UPDATE provider_configs
+                SET cli_auth_paused_reason = ?2,
+                    updated_at_ms = ?3
+                WHERE provider_id = ?1
+                "#,
+                params![provider_id, cleaned, now_ms],
+            )?;
+            Ok(())
+        })
+    }
+
     pub fn set_provider_has_credential(
         &self,
         provider_id: &str,

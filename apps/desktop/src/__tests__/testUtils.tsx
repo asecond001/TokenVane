@@ -74,6 +74,7 @@ export function makePreferences(overrides: Partial<AppPreferences> = {}): AppPre
     exchange_rate_auto: true,
     auto_check_updates: true,
     floating_window_enabled: false,
+    background_cli_quota_poll: true,
     last_rate_sync_at_ms: null,
     last_pricing_sync_at_ms: null,
     last_subscription_sync_at_ms: null,

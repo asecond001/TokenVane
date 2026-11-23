@@ -1771,7 +1771,7 @@ fn v13_to_v14_migration_adds_remote_subscription_fee_and_payg_snapshots() {
         .with_conn(|conn| {
             let ver: i64 =
                 conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r.get(0))?;
-            assert_eq!(ver, 14);
+            assert_eq!(ver, crate::storage::migrations::CURRENT_SCHEMA_VERSION);
             let has_fee_col: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('remote_subscription_snapshots') WHERE name = 'monthly_fee_micro_usd'",
                 [],
@@ -1787,4 +1787,101 @@ fn v13_to_v14_migration_adds_remote_subscription_fee_and_payg_snapshots() {
             Ok(())
         })
         .expect("verify v14");
+}
+
+#[test]
+fn v14_to_v15_migration_adds_background_cli_quota_poll_and_cli_auth_pause() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("v14.db");
+    {
+        let storage = Storage::open_file(&db_path).expect("open current");
+        storage
+            .with_conn(|conn| {
+                conn.execute(
+                    "ALTER TABLE app_preferences DROP COLUMN background_cli_quota_poll",
+                    [],
+                )?;
+                conn.execute(
+                    "ALTER TABLE provider_configs DROP COLUMN cli_auth_paused_reason",
+                    [],
+                )?;
+                conn.execute("DELETE FROM schema_migrations WHERE version >= 15", [])?;
+                Ok(())
+            })
+            .expect("rewind to v14");
+    }
+
+    let storage = Storage::open_file(&db_path).expect("migrate v14 -> v15");
+    storage
+        .with_conn(|conn| {
+            let ver: i64 =
+                conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r.get(0))?;
+            assert_eq!(ver, crate::storage::migrations::CURRENT_SCHEMA_VERSION);
+            let has_col: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('app_preferences') WHERE name = 'background_cli_quota_poll'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(has_col, 1);
+            let has_pause_col: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('provider_configs') WHERE name = 'cli_auth_paused_reason'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(has_pause_col, 1);
+            Ok(())
+        })
+        .expect("verify v15 schema");
+
+    let mut prefs = storage.get_preferences().expect("prefs");
+    assert!(prefs.background_cli_quota_poll);
+    prefs.background_cli_quota_poll = false;
+    storage.update_preferences(&prefs).expect("disable cli poll");
+    assert!(!storage
+        .get_preferences()
+        .expect("reload disabled")
+        .background_cli_quota_poll);
+    prefs.background_cli_quota_poll = true;
+    storage.update_preferences(&prefs).expect("enable cli poll");
+    assert!(storage
+        .get_preferences()
+        .expect("reload enabled")
+        .background_cli_quota_poll);
+
+    assert_eq!(
+        storage
+            .get_cli_auth_paused_reason(provider_ids::ANTIGRAVITY)
+            .expect("initial auth pause"),
+        None
+    );
+    storage
+        .set_cli_auth_paused_reason(provider_ids::ANTIGRAVITY, Some("  agy CLI Not signed in  "))
+        .expect("set auth pause");
+    assert_eq!(
+        storage
+            .get_cli_auth_paused_reason(provider_ids::ANTIGRAVITY)
+            .expect("persisted auth pause")
+            .as_deref(),
+        Some("agy CLI Not signed in")
+    );
+    // Regular sync status updates must not clear cli_auth_paused_reason.
+    storage
+        .set_provider_sync_status(provider_ids::ANTIGRAVITY, Some(12345), None)
+        .expect("set sync status");
+    assert_eq!(
+        storage
+            .get_cli_auth_paused_reason(provider_ids::ANTIGRAVITY)
+            .expect("retained auth pause")
+            .as_deref(),
+        Some("agy CLI Not signed in")
+    );
+    storage
+        .set_cli_auth_paused_reason(provider_ids::ANTIGRAVITY, Some("   "))
+        .expect("blank clears auth pause");
+    assert_eq!(
+        storage
+            .get_cli_auth_paused_reason(provider_ids::ANTIGRAVITY)
+            .expect("cleared auth pause"),
+        None
+    );
 }

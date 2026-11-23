@@ -888,10 +888,16 @@ pub async fn refresh_provider_balance(
     if trimmed_provider.eq_ignore_ascii_case("claude_code") {
         // Explicit user sync re-checks the subscription tier instead of reusing the 6h cache.
         tokvane_collectors::providers::claude_cli::invalidate_claude_auth_cache();
+        let _ = state
+            .storage
+            .set_cli_auth_paused_reason("claude_code", None);
     }
     if trimmed_provider.eq_ignore_ascii_case("antigravity") {
         // Explicit user sync retries immediately instead of waiting out the failure backoff.
         tokvane_collectors::providers::antigravity::reset_agy_probe_backoff();
+        let _ = state
+            .storage
+            .set_cli_auth_paused_reason("antigravity", None);
     }
     let outcome = collect_provider_balance(&state.storage, &provider_id, state.credentials.as_ref())
         .await
@@ -940,6 +946,8 @@ fn launch_provider_cli_login_blocking(
                         "请先安装官方 agy CLI（%LOCALAPPDATA%\\agy\\bin\\agy.exe）",
                     )
                 })?;
+            tokvane_collectors::providers::antigravity::reset_agy_probe_backoff();
+            let _ = storage.set_cli_auth_paused_reason("antigravity", None);
             (bin, Vec::new())
         }
         "codex" => ("codex".to_string(), vec!["login"]),
@@ -950,6 +958,7 @@ fn launch_provider_cli_login_blocking(
                     IpcError::new("CLI_LOGIN_UNAVAILABLE", "请先安装官方 Claude Code CLI（claude）")
                 })?;
             tokvane_collectors::providers::claude_cli::invalidate_claude_auth_cache();
+            let _ = storage.set_cli_auth_paused_reason("claude_code", None);
             (bin, vec!["auth", "login"])
         }
         _ => {

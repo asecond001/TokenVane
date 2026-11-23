@@ -57,7 +57,8 @@ impl Storage {
                     exchange_rate_auto = ?15,
                     auto_check_updates = ?16,
                     floating_window_enabled = ?17,
-                    updated_at_ms = ?18
+                    background_cli_quota_poll = ?18,
+                    updated_at_ms = ?19
                 WHERE id = 1
                 "#,
                 params![
@@ -78,6 +79,7 @@ impl Storage {
                     i64::from(prefs.exchange_rate_auto),
                     i64::from(prefs.auto_check_updates),
                     i64::from(prefs.floating_window_enabled),
+                    i64::from(prefs.background_cli_quota_poll),
                     now_ms,
                 ],
             )?;
@@ -115,7 +117,7 @@ pub(crate) fn load_preferences(conn: &Connection) -> CoreResult<AppPreferences> 
                bg_mode, bg_image_path, bg_preset_id, bg_opacity, bg_blur_px,
                auto_sync_pricing, exchange_rate_auto, last_rate_sync_at_ms, last_pricing_sync_at_ms,
                last_subscription_sync_at_ms,
-               auto_check_updates, floating_window_enabled, updated_at_ms
+               auto_check_updates, floating_window_enabled, background_cli_quota_poll, updated_at_ms
         FROM app_preferences
         WHERE id = 1
         "#,
@@ -143,7 +145,8 @@ pub(crate) fn load_preferences(conn: &Connection) -> CoreResult<AppPreferences> 
                 last_subscription_sync_at_ms: row.get(17)?,
                 auto_check_updates: row.get::<_, i64>(18)? != 0,
                 floating_window_enabled: row.get::<_, i64>(19)? != 0,
-                updated_at_ms: row.get(20)?,
+                background_cli_quota_poll: row.get::<_, i64>(20)? != 0,
+                updated_at_ms: row.get(21)?,
             })
         },
     )

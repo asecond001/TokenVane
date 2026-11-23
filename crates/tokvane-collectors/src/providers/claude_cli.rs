@@ -28,11 +28,25 @@ const USAGE_TIMEOUT: Duration = Duration::from_secs(40);
 const AUTH_CACHE_TTL: Duration = Duration::from_secs(6 * 3_600);
 
 static AUTH_CACHE: Mutex<Option<(ClaudeAuthStatus, Instant)>> = Mutex::new(None);
+static CLAUDE_AUTH_PAUSED: Mutex<Option<String>> = Mutex::new(None);
 
-/// Drop the cached `claude auth status` result (e.g. after launching `claude auth login`).
+/// Drop the cached `claude auth status` result and resume probing (e.g. after manual sync or login).
 pub fn invalidate_claude_auth_cache() {
     if let Ok(mut guard) = AUTH_CACHE.lock() {
         *guard = None;
+    }
+    if let Ok(mut guard) = CLAUDE_AUTH_PAUSED.lock() {
+        *guard = None;
+    }
+}
+
+fn paused_claude_auth_error() -> Option<String> {
+    CLAUDE_AUTH_PAUSED.lock().ok()?.clone()
+}
+
+fn pause_claude_probes(reason: &str) {
+    if let Ok(mut guard) = CLAUDE_AUTH_PAUSED.lock() {
+        *guard = Some(reason.to_string());
     }
 }
 
@@ -177,16 +191,13 @@ fn run_claude_cli_blocking(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // CREATE_NO_WINDOW prevents flashing a console window during background polling.
-        cmd.creation_flags(0x0800_0000);
-    }
+    crate::cli_process::apply_headless_no_browser_env(&mut cmd);
+    crate::cli_process::configure_hidden_cli_command(&mut cmd);
 
     let mut child = cmd
         .spawn()
         .map_err(|e| CollectorError::Compliance(format!("启动 Claude Code CLI 失败: {e}")))?;
+    let job_guard = crate::cli_process::ChildProcessGuard::attach(&child);
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
 
@@ -212,6 +223,7 @@ fn run_claude_cli_blocking(
                 Ok(Some(st)) => break Ok(st),
                 Ok(None) => {
                     if std::time::Instant::now() >= deadline {
+                        job_guard.terminate_tree();
                         let _ = child.kill();
                         let _ = child.wait();
                         break Err(CollectorError::Compliance(format!(
@@ -222,6 +234,7 @@ fn run_claude_cli_blocking(
                     std::thread::sleep(Duration::from_millis(40));
                 }
                 Err(e) => {
+                    job_guard.terminate_tree();
                     let _ = child.kill();
                     let _ = child.wait();
                     break Err(CollectorError::Compliance(format!(
@@ -234,6 +247,8 @@ fn run_claude_cli_blocking(
         let err_b = err_handle.join().unwrap_or_default();
         (status, out_b, err_b)
     });
+
+    drop(job_guard);
 
     let status = status?;
     Ok(CliOutput {
@@ -570,16 +585,40 @@ fn probe_auth_status(bin_path: &Path, cwd: &Path) -> CollectorResult<ClaudeAuthS
     })
 }
 
+pub(crate) fn is_claude_auth_or_timeout_error(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    lower.contains("not logged in")
+        || lower.contains("not signed in")
+        || lower.contains("unauthenticated")
+        || lower.contains("unauthorized")
+        || lower.contains("authentication")
+        || msg.contains("待登录")
+        || msg.contains("超时")
+}
+
 fn collect_claude_cli_usage_blocking(
     bin_path: &Path,
     now_ms: i64,
 ) -> CollectorResult<(ProviderBalanceSnapshot, Vec<ObservedRateLimitWindow>)> {
+    if let Some(reason) = paused_claude_auth_error() {
+        return Err(CollectorError::Compliance(reason));
+    }
+
     let cwd = claude_probe_dir()?;
 
     let auth = match cached_auth_status() {
         Some(cached) => cached,
         None => {
-            let fresh = probe_auth_status(bin_path, &cwd)?;
+            let fresh = match probe_auth_status(bin_path, &cwd) {
+                Ok(st) => st,
+                Err(err) => {
+                    let msg = err.to_string();
+                    if is_claude_auth_or_timeout_error(&msg) {
+                        pause_claude_probes(&msg);
+                    }
+                    return Err(err);
+                }
+            };
             if fresh.logged_in && fresh.uses_subscription() {
                 store_auth_status(&fresh);
             }
@@ -587,35 +626,52 @@ fn collect_claude_cli_usage_blocking(
         }
     };
     if !auth.logged_in {
-        return Err(CollectorError::Compliance(
-            "Claude Code 待登录，请先完成终端登录".to_string(),
-        ));
+        let msg = "Claude Code 待登录，已暂停自动探测；请在「用量」完成登录后点击同步".to_string();
+        pause_claude_probes(&msg);
+        return Err(CollectorError::Compliance(msg));
     }
     if !auth.uses_subscription() {
-        return Err(CollectorError::Compliance(
-            "Claude Code 当前为 API 计费登录，订阅配额需使用 Claude 账户登录".to_string(),
-        ));
+        let msg =
+            "Claude Code 当前为 API 计费登录，订阅配额需使用 Claude 账户登录（已暂停自动探测）"
+                .to_string();
+        pause_claude_probes(&msg);
+        return Err(CollectorError::Compliance(msg));
     }
     let plan_hint = auth.plan_hint();
 
-    let usage_out = run_claude_cli_blocking(bin_path, USAGE_ARGS, &cwd, USAGE_TIMEOUT)?;
+    let usage_out = match run_claude_cli_blocking(bin_path, USAGE_ARGS, &cwd, USAGE_TIMEOUT) {
+        Ok(out) => out,
+        Err(err) => {
+            let msg = err.to_string();
+            if is_claude_auth_or_timeout_error(&msg) {
+                pause_claude_probes(&msg);
+            }
+            return Err(err);
+        }
+    };
     let windows = match parse_claude_usage_output(&usage_out.stdout, now_ms, plan_hint) {
         Ok(w) => w,
         Err(err) => {
             // Login state may have changed; re-probe `auth status` on the next attempt.
             invalidate_claude_auth_cache();
-            if usage_out.success {
-                return Err(err);
-            }
-            let snippet = stderr_snippet(&usage_out.stderr);
-            return Err(if snippet.is_empty() {
+            let err_to_return = if usage_out.success {
                 err
             } else {
-                CollectorError::Compliance(format!(
-                    "Claude CLI /usage 退出失败 ({}): {snippet}",
-                    usage_out.status_desc
-                ))
-            });
+                let snippet = stderr_snippet(&usage_out.stderr);
+                if snippet.is_empty() {
+                    err
+                } else {
+                    CollectorError::Compliance(format!(
+                        "Claude CLI /usage 退出失败 ({}): {snippet}",
+                        usage_out.status_desc
+                    ))
+                }
+            };
+            let msg = err_to_return.to_string();
+            if is_claude_auth_or_timeout_error(&msg) {
+                pause_claude_probes(&msg);
+            }
+            return Err(err_to_return);
         }
     };
 
@@ -723,5 +779,28 @@ mod tests {
             .expect("utc")
             .timestamp_millis();
         assert_eq!(reset, expected);
+    }
+
+    #[test]
+    fn claude_auth_pause_stops_probes_until_cache_invalidated() {
+        assert!(is_claude_auth_or_timeout_error("Not logged in"));
+        assert!(is_claude_auth_or_timeout_error("调用 Claude Code CLI 超时（>20s）"));
+        assert!(!is_claude_auth_or_timeout_error("temporary parse glitch"));
+
+        invalidate_claude_auth_cache();
+        assert!(paused_claude_auth_error().is_none());
+
+        pause_claude_probes("Claude Code 待登录");
+        assert_eq!(
+            paused_claude_auth_error().as_deref(),
+            Some("Claude Code 待登录")
+        );
+
+        let err = collect_claude_cli_usage_blocking(Path::new("nonexistent-claude"), 0)
+            .expect_err("paused probe must short-circuit without spawning");
+        assert!(err.to_string().contains("Claude Code 待登录"));
+
+        invalidate_claude_auth_cache();
+        assert!(paused_claude_auth_error().is_none());
     }
 }

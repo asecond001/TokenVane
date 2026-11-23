@@ -359,9 +359,22 @@ where
     .await
 }
 
+fn is_cli_auth_or_timeout_error(provider_id: &str, msg: &str) -> bool {
+    match provider_id {
+        provider_ids::ANTIGRAVITY => {
+            crate::providers::antigravity::is_agy_auth_or_interactive_error(msg)
+        }
+        provider_ids::CLAUDE_CODE => {
+            crate::providers::claude_cli::is_claude_auth_or_timeout_error(msg)
+        }
+        _ => false,
+    }
+}
+
 /// Testable official CLI quota polling entry point (Antigravity `agy`, Claude Code `claude`) with
-/// 60-second cooldown. On success the provider's `official_cli` windows are atomically replaced;
-/// on failure the last good windows are retained and the sync error is recorded.
+/// 60-second cooldown. On success the provider's `official_cli` windows are atomically replaced and
+/// any persisted auth pause is cleared; on auth/timeout failure the pause reason is persisted in
+/// SQLite so background polling stays quiet across restarts until the user manually syncs/logs in.
 pub async fn refresh_cli_quota_with_runner<F, Fut>(
     storage: &Storage,
     provider_id: &str,
@@ -374,6 +387,10 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = CollectorResult<(ProviderBalanceSnapshot, Vec<ObservedRateLimitWindow>)>>,
 {
+    if let Some(reason) = storage.get_cli_auth_paused_reason(provider_id)? {
+        return Err(CollectorError::Compliance(reason));
+    }
+
     if !bypass_cooldown {
         if let Some(cached) = storage.get_provider_balance(provider_id)? {
             let age_ms = now_ms.saturating_sub(cached.fetched_at_ms);
@@ -396,6 +413,7 @@ where
             let rate_limits_updated = rate_limits.len();
             storage.replace_provider_source_rate_limits(provider_id, "official_cli", &rate_limits)?;
             storage.upsert_provider_balance(&snapshot)?;
+            let _ = storage.set_cli_auth_paused_reason(provider_id, None);
             let _ = storage.set_provider_sync_status(provider_id, Some(now_ms), None);
             Ok(BalanceRefreshOutcome {
                 snapshot,
@@ -406,7 +424,11 @@ where
             })
         }
         Err(err) => {
-            let _ = storage.set_provider_sync_status(provider_id, None, Some(&err.to_string()));
+            let msg = err.to_string();
+            if is_cli_auth_or_timeout_error(provider_id, &msg) {
+                let _ = storage.set_cli_auth_paused_reason(provider_id, Some(&msg));
+            }
+            let _ = storage.set_provider_sync_status(provider_id, None, Some(&msg));
             Err(err)
         }
     }

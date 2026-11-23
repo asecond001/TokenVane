@@ -314,6 +314,11 @@ async fn poll_configured_provider_apis(
     app: &AppHandle,
     sync_client: &SyncClientHandle,
 ) {
+    let allow_background_cli = storage
+        .get_preferences()
+        .map(|p| p.background_cli_quota_poll)
+        .unwrap_or(true);
+    let fullscreen_busy = tokvane_collectors::is_fullscreen_busy();
     let Ok(configs) = storage.list_provider_configs() else {
         return;
     };
@@ -321,7 +326,7 @@ async fn poll_configured_provider_apis(
     let mut any_rate_limits = false;
 
     for cfg in configs {
-        if !quota_refresh_available(&cfg) {
+        if !quota_refresh_available(storage, &cfg, allow_background_cli, fullscreen_busy) {
             continue;
         }
         match tokvane_collectors::refresh_provider_balance(storage, &cfg.provider_id, credentials)
@@ -367,36 +372,80 @@ fn official_cli_installed(provider_id: &str) -> bool {
     }
 }
 
-/// Whether an enabled provider's official quota / balance can be refreshed right now: CLI-backed
-/// providers need their CLI installed, API-key providers need a stored credential.
+fn background_cli_quota_eligible(
+    allow_background_cli: bool,
+    cli_installed: bool,
+    has_prior_snapshot: bool,
+    auth_paused: bool,
+    fullscreen_busy: bool,
+) -> bool {
+    allow_background_cli && !fullscreen_busy && cli_installed && has_prior_snapshot && !auth_paused
+}
+
+/// Whether an enabled provider's official quota / balance can be refreshed in the background:
+/// CLI-backed providers require the user opt-in preference (`background_cli_quota_poll`), no
+/// fullscreen/DND state, the binary on disk, at least one prior successful snapshot (so unconfigured
+/// CLIs are never probed blindly), and no persisted auth/timeout pause; API-key providers require a
+/// stored credential.
 ///
 /// [`activity_refresh_kind`] is the single source of truth for which providers qualify.
-fn quota_refresh_available(cfg: &ProviderConfig) -> bool {
+fn quota_refresh_available(
+    storage: &Storage,
+    cfg: &ProviderConfig,
+    allow_background_cli: bool,
+    fullscreen_busy: bool,
+) -> bool {
     if !cfg.enabled {
         return false;
     }
     match activity_refresh_kind(&cfg.provider_id) {
         Some(QuotaRefreshKind::OfficialApiKey) => cfg.has_credential,
-        Some(QuotaRefreshKind::OfficialCli) => official_cli_installed(&cfg.provider_id),
+        Some(QuotaRefreshKind::OfficialCli) => {
+            if !allow_background_cli || fullscreen_busy || !official_cli_installed(&cfg.provider_id) {
+                return false;
+            }
+            let has_prior_snapshot = storage
+                .get_provider_balance(&cfg.provider_id)
+                .ok()
+                .flatten()
+                .is_some();
+            let auth_paused = storage
+                .get_cli_auth_paused_reason(&cfg.provider_id)
+                .ok()
+                .flatten()
+                .is_some();
+            background_cli_quota_eligible(
+                allow_background_cli,
+                true,
+                has_prior_snapshot,
+                auth_paused,
+                fullscreen_busy,
+            )
+        }
         None => false,
     }
 }
 
-/// Whether a provider with fresh log activity can have its official quota refreshed right now.
+/// Whether a provider with fresh log activity can have its official quota refreshed in the background.
 fn activity_refresh_eligible(storage: &Storage, provider_id: &str) -> bool {
     if activity_refresh_kind(provider_id).is_none() {
         return false;
     }
+    let allow_background_cli = storage
+        .get_preferences()
+        .map(|p| p.background_cli_quota_poll)
+        .unwrap_or(true);
+    let fullscreen_busy = tokvane_collectors::is_fullscreen_busy();
     storage
         .list_provider_configs()
         .ok()
         .and_then(|configs| configs.into_iter().find(|c| c.provider_id == provider_id))
-        .is_some_and(|cfg| quota_refresh_available(&cfg))
+        .is_some_and(|cfg| quota_refresh_available(storage, &cfg, allow_background_cli, fullscreen_busy))
 }
 
 /// Refresh official quota shortly after a provider shows new local activity (at most once per
-/// 60s per provider, with one trailing refresh after a burst), so quota bars track live usage
-/// instead of waiting for the 5-minute poll.
+/// 60s for API-key providers or 5 minutes for opt-in CLI probes, with one trailing refresh after
+/// a burst), so quota bars track live usage instead of waiting for the 5-minute poll.
 async fn run_activity_quota_refresher(
     storage: Storage,
     credentials: Arc<dyn CredentialManager>,
@@ -416,13 +465,25 @@ async fn run_activity_quota_refresher(
         let sync_client = sync_client.clone();
         let throttle = Arc::clone(&throttle);
         tauri::async_runtime::spawn(async move {
-            match tokvane_collectors::refresh_provider_balance_force(
-                &storage,
-                &provider_id,
-                credentials.as_ref(),
-            )
-            .await
-            {
+            let outcome_res = match activity_refresh_kind(&provider_id) {
+                Some(QuotaRefreshKind::OfficialCli) => {
+                    tokvane_collectors::refresh_provider_balance(
+                        &storage,
+                        &provider_id,
+                        credentials.as_ref(),
+                    )
+                    .await
+                }
+                _ => {
+                    tokvane_collectors::refresh_provider_balance_force(
+                        &storage,
+                        &provider_id,
+                        credentials.as_ref(),
+                    )
+                    .await
+                }
+            };
+            match outcome_res {
                 Ok(outcome) => {
                     let _ = storage.set_provider_sync_status(
                         &provider_id,
@@ -471,7 +532,11 @@ async fn run_activity_quota_refresher(
                     .map(|mut guard| guard.take_due(now_ms))
                     .unwrap_or_default();
                 for provider_id in due {
-                    start_refresh(provider_id);
+                    if activity_refresh_eligible(&storage, &provider_id) {
+                        start_refresh(provider_id);
+                    } else if let Ok(mut guard) = throttle.lock() {
+                        guard.finish(&provider_id);
+                    }
                 }
             }
             _ = shutdown_rx.changed() => {
@@ -480,5 +545,54 @@ async fn run_activity_quota_refresher(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokvane_core::domain::CollectionMode;
+
+    fn make_cfg(provider_id: &str, enabled: bool, has_credential: bool) -> ProviderConfig {
+        ProviderConfig {
+            provider_id: provider_id.to_string(),
+            enabled,
+            collection_mode: CollectionMode::LocalLog,
+            custom_log_paths: Vec::new(),
+            has_credential,
+            last_sync_at_ms: None,
+            last_error: None,
+            updated_at_ms: 0,
+        }
+    }
+
+    #[test]
+    fn background_cli_quota_poll_requires_opt_in_prior_sync_no_auth_pause_and_not_fullscreen() {
+        assert!(background_cli_quota_eligible(true, true, true, false, false));
+        assert!(!background_cli_quota_eligible(false, true, true, false, false));
+        assert!(!background_cli_quota_eligible(true, false, true, false, false));
+        assert!(!background_cli_quota_eligible(true, true, false, false, false));
+        assert!(!background_cli_quota_eligible(true, true, true, true, false));
+        assert!(!background_cli_quota_eligible(true, true, true, false, true));
+
+        let storage = Storage::open_in_memory().expect("in-memory db");
+        let agy_cfg = make_cfg(provider_ids::ANTIGRAVITY, true, false);
+        let claude_cfg = make_cfg(provider_ids::CLAUDE_CODE, true, false);
+        let kimi_with_key = make_cfg(provider_ids::KIMI_CODE, true, true);
+        let kimi_without_key = make_cfg(provider_ids::KIMI_CODE, true, false);
+        let kimi_disabled = make_cfg(provider_ids::KIMI_CODE, false, true);
+
+        // Fresh DB has no prior snapshot for CLI providers, so background CLI polling stays off.
+        assert!(!quota_refresh_available(&storage, &agy_cfg, true, false));
+        assert!(!quota_refresh_available(&storage, &claude_cfg, true, false));
+        assert!(!quota_refresh_available(&storage, &agy_cfg, false, false));
+        assert!(!quota_refresh_available(&storage, &agy_cfg, true, true));
+
+        // API-key providers remain unaffected by CLI flags or fullscreen state.
+        assert!(quota_refresh_available(&storage, &kimi_with_key, false, false));
+        assert!(quota_refresh_available(&storage, &kimi_with_key, false, true));
+        assert!(quota_refresh_available(&storage, &kimi_with_key, true, false));
+        assert!(!quota_refresh_available(&storage, &kimi_without_key, true, false));
+        assert!(!quota_refresh_available(&storage, &kimi_disabled, true, false));
     }
 }

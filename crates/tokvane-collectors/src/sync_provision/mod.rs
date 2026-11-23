@@ -304,12 +304,7 @@ fn build_wrangler_command(
         }
     }
 
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // CREATE_NO_WINDOW keeps desktop UI free from flashing console windows.
-        cmd.creation_flags(0x0800_0000);
-    }
+    crate::cli_process::configure_hidden_cli_command(&mut cmd);
     cmd
 }
 
@@ -326,6 +321,8 @@ fn run_wrangler_blocking(
     let mut child = cmd
         .spawn()
         .map_err(|e| CollectorError::Compliance(format!("启动 Wrangler CLI 失败: {e}")))?;
+    // Never bind an interactive `wrangler login` browser launch to a kill-on-close job object.
+    let job_guard = (!interactive_login).then(|| crate::cli_process::ChildProcessGuard::attach(&child));
 
     if let Some(bytes) = stdin_data {
         if let Some(mut stdin_pipe) = child.stdin.take() {
@@ -361,6 +358,9 @@ fn run_wrangler_blocking(
                 Ok(Some(st)) => break Ok(st),
                 Ok(None) => {
                     if std::time::Instant::now() >= deadline {
+                        if let Some(ref guard) = job_guard {
+                            guard.terminate_tree();
+                        }
                         let _ = child.kill();
                         let _ = child.wait();
                         break Err(CollectorError::Compliance(format!(
@@ -371,6 +371,9 @@ fn run_wrangler_blocking(
                     std::thread::sleep(Duration::from_millis(40));
                 }
                 Err(e) => {
+                    if let Some(ref guard) = job_guard {
+                        guard.terminate_tree();
+                    }
                     let _ = child.kill();
                     let _ = child.wait();
                     break Err(CollectorError::Compliance(format!(
@@ -384,6 +387,8 @@ fn run_wrangler_blocking(
         let err_b = stderr_handle.join().unwrap_or_default();
         (status, out_b, err_b)
     });
+
+    drop(job_guard);
 
     let status = wait_res?;
     Ok(WranglerCmdOutput {

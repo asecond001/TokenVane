@@ -415,6 +415,8 @@ pub struct AppPreferences {
     pub auto_check_updates: bool,
     #[serde(default)]
     pub floating_window_enabled: bool,
+    #[serde(default = "default_true")]
+    pub background_cli_quota_poll: bool,
     pub updated_at_ms: i64,
 }
 
@@ -441,6 +443,7 @@ impl Default for AppPreferences {
             last_subscription_sync_at_ms: None,
             auto_check_updates: true,
             floating_window_enabled: false,
+            background_cli_quota_poll: true,
             updated_at_ms: 0,
         }
     }

@@ -85,6 +85,7 @@ interface SyncedFormSnapshot {
   minimize_to_tray: boolean;
   launch_at_startup: boolean;
   floating_window_enabled: boolean;
+  background_cli_quota_poll: boolean;
   device_display_name: string;
   auto_sync_pricing: boolean;
   exchange_rate_auto: boolean;
@@ -172,6 +173,7 @@ export function PreferencesPage({
   const [minimizeToTray, setMinimizeToTray] = useState(true);
   const [launchAtStartup, setLaunchAtStartup] = useState(false);
   const [floatingWindowEnabled, setFloatingWindowEnabled] = useState(false);
+  const [backgroundCliQuotaPoll, setBackgroundCliQuotaPoll] = useState(true);
   const [deviceDisplayName, setDeviceDisplayName] = useState('');
   const [autoSyncPricing, setAutoSyncPricing] = useState(true);
   const [exchangeRateAuto, setExchangeRateAuto] = useState(true);
@@ -222,6 +224,7 @@ export function PreferencesPage({
     const nextMinimize = src.minimize_to_tray ?? true;
     const nextAutostart = src.launch_at_startup ?? false;
     const nextFloating = src.floating_window_enabled ?? false;
+    const nextCliPoll = src.background_cli_quota_poll ?? true;
     const nextDeviceName = src.device_display_name ?? '';
     const nextAutoSync = src.auto_sync_pricing ?? true;
     const nextRateAuto = src.exchange_rate_auto ?? true;
@@ -242,6 +245,9 @@ export function PreferencesPage({
     if (!prev || prev.floating_window_enabled !== nextFloating) {
       setFloatingWindowEnabled(nextFloating);
     }
+    if (!prev || prev.background_cli_quota_poll !== nextCliPoll) {
+      setBackgroundCliQuotaPoll(nextCliPoll);
+    }
     if (!prev || prev.device_display_name !== nextDeviceName) {
       setDeviceDisplayName(nextDeviceName);
     }
@@ -261,6 +267,7 @@ export function PreferencesPage({
       minimize_to_tray: nextMinimize,
       launch_at_startup: nextAutostart,
       floating_window_enabled: nextFloating,
+      background_cli_quota_poll: nextCliPoll,
       device_display_name: nextDeviceName,
       auto_sync_pricing: nextAutoSync,
       exchange_rate_auto: nextRateAuto,
@@ -523,6 +530,7 @@ export function PreferencesPage({
         minimize_to_tray: minimizeToTray,
         launch_at_startup: launchAtStartup,
         floating_window_enabled: floatingWindowEnabled,
+        background_cli_quota_poll: backgroundCliQuotaPoll,
         device_display_name: deviceDisplayName.trim() || base.device_display_name,
         auto_sync_pricing: autoSyncPricing,
         exchange_rate_auto: exchangeRateAuto,
@@ -559,6 +567,7 @@ export function PreferencesPage({
         minimize_to_tray: saved.minimize_to_tray,
         launch_at_startup: saved.launch_at_startup,
         floating_window_enabled: saved.floating_window_enabled,
+        background_cli_quota_poll: saved.background_cli_quota_poll,
         device_display_name: saved.device_display_name,
         auto_sync_pricing: saved.auto_sync_pricing,
         exchange_rate_auto: saved.exchange_rate_auto,
@@ -685,6 +694,16 @@ export function PreferencesPage({
           kind: 'error',
         });
       });
+  };
+
+  const handleBackgroundCliQuotaPollToggle = (enabled: boolean) => {
+    setBackgroundCliQuotaPoll(enabled);
+    void persistPreferences({ background_cli_quota_poll: enabled }).catch((err: unknown) => {
+      setNotice({
+        text: err instanceof Error ? err.message : '切换后台 CLI 配额轮询设置失败',
+        kind: 'error',
+      });
+    });
   };
 
   const handleFloatingElementToggle = (id: FloatingModuleId) => {
@@ -1209,6 +1228,28 @@ export function PreferencesPage({
               />
               <span>Windows 登录后自动启动</span>
             </label>
+          </div>
+        </div>
+
+        <div
+          className="py-3.5 grid grid-cols-12 gap-4 items-start"
+          style={{ borderBottom: '1px solid var(--border-hairline)' }}
+        >
+          <div className="col-span-4 pt-0.5">
+            <div className="text-[13px] font-medium">后台 CLI 配额轮询</div>
+          </div>
+          <div className="col-span-8 space-y-1.5 text-[12px]">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={backgroundCliQuotaPoll}
+                onChange={(e) => handleBackgroundCliQuotaPollToggle(e.target.checked)}
+              />
+              <span>后台自动调用官方 CLI 刷新配额（Antigravity / Claude Code）</span>
+            </label>
+            <p className="text-[11px] leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+              默认开启静默轮询：仅对已成功同步过至少一次的 CLI（Antigravity / Claude Code）在后台每 5 分钟隐藏窗口探测，自动注入禁浏览器变量；检测到全屏游戏或演示时自动跳过，遇到未登录或超时将持久化暂停直到手动同步。关闭后仅保留手动刷新，本地日志采集不受影响。
+            </p>
           </div>
         </div>
 

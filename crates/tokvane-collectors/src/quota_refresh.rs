@@ -11,8 +11,10 @@ use std::collections::{HashMap, HashSet};
 
 use tokvane_core::domain::provider_ids;
 
-/// Minimum spacing between two activity-triggered refreshes of the same provider.
+/// Minimum spacing between two activity-triggered refreshes for API-key providers.
 pub const ACTIVITY_REFRESH_MIN_INTERVAL_MS: i64 = 60_000;
+/// Longer minimum spacing for official CLI subprocess probes (opt-in background polling).
+pub const CLI_ACTIVITY_REFRESH_MIN_INTERVAL_MS: i64 = 300_000;
 
 /// How a provider's quota can be refreshed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +37,14 @@ pub fn activity_refresh_kind(provider_id: &str) -> Option<QuotaRefreshKind> {
     }
 }
 
+/// Minimum activity-refresh spacing for `provider_id`.
+pub fn min_interval_ms_for_provider(provider_id: &str) -> i64 {
+    match activity_refresh_kind(provider_id) {
+        Some(QuotaRefreshKind::OfficialCli) => CLI_ACTIVITY_REFRESH_MIN_INTERVAL_MS,
+        _ => ACTIVITY_REFRESH_MIN_INTERVAL_MS,
+    }
+}
+
 /// Per-provider leading-edge + trailing-edge throttle.
 #[derive(Debug, Default)]
 pub struct ActivityRefreshThrottle {
@@ -49,9 +59,10 @@ impl ActivityRefreshThrottle {
     }
 
     fn interval_elapsed(&self, provider_id: &str, now_ms: i64) -> bool {
+        let min_interval = min_interval_ms_for_provider(provider_id);
         self.last_started_ms
             .get(provider_id)
-            .is_none_or(|last| now_ms.saturating_sub(*last) >= ACTIVITY_REFRESH_MIN_INTERVAL_MS)
+            .is_none_or(|last| now_ms.saturating_sub(*last) >= min_interval)
     }
 
     /// Record new activity. Returns `true` when a refresh should start immediately; otherwise the
@@ -120,16 +131,23 @@ mod tests {
     #[test]
     fn leading_edge_then_single_trailing_refresh() {
         let mut t = ActivityRefreshThrottle::new();
-        let pid = provider_ids::CLAUDE_CODE;
+        let pid = provider_ids::KIMI_CODE;
 
         assert!(t.on_activity(pid, 0), "first activity starts immediately");
         assert!(!t.on_activity(pid, 1_000), "in-flight activity is queued");
         t.finish(pid);
         assert!(!t.on_activity(pid, 20_000), "inside interval is queued");
         assert!(!t.on_activity(pid, 30_000));
-        assert!(t.take_due(59_999).is_empty(), "trailing waits for the interval");
+        assert!(t.take_due(59_999).is_empty(), "trailing waits for the 60s API interval");
         assert_eq!(t.take_due(60_000), vec![pid.to_string()]);
         assert!(t.take_due(200_000).is_empty(), "burst coalesces into one trailing refresh");
+
+        let cli_pid = provider_ids::ANTIGRAVITY;
+        assert!(t.on_activity(cli_pid, 0), "first CLI activity starts immediately");
+        t.finish(cli_pid);
+        assert!(!t.on_activity(cli_pid, 60_000), "CLI cooldown is 300s");
+        assert!(t.take_due(299_999).is_empty(), "CLI trailing waits for 300s");
+        assert_eq!(t.take_due(300_000), vec![cli_pid.to_string()]);
     }
 
     #[test]
@@ -138,11 +156,11 @@ mod tests {
         let pid = provider_ids::ANTIGRAVITY;
         assert!(t.on_activity(pid, 0));
         assert!(!t.on_activity(pid, 10_000));
-        assert!(t.take_due(70_000).is_empty(), "still running");
+        assert!(t.take_due(310_000).is_empty(), "still running");
         t.finish(pid);
-        assert_eq!(t.take_due(70_000), vec![pid.to_string()]);
+        assert_eq!(t.take_due(310_000), vec![pid.to_string()]);
         t.finish(pid);
-        assert!(t.on_activity(pid, 130_000), "next interval starts immediately again");
+        assert!(t.on_activity(pid, 610_000), "next 300s interval starts immediately again");
     }
 
     #[test]

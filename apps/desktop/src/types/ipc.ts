@@ -60,6 +60,7 @@ export interface AppPreferences {
   exchange_rate_auto: boolean;
   auto_check_updates: boolean;
   floating_window_enabled: boolean;
+  background_cli_quota_poll: boolean;
   last_rate_sync_at_ms: number | null;
   last_pricing_sync_at_ms: number | null;
   last_subscription_sync_at_ms: number | null;

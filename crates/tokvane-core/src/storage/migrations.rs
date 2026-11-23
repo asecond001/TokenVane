@@ -9,7 +9,7 @@ use crate::error::CoreResult;
 use crate::pricing::default_pricing_catalog;
 use crate::storage::repository::{rebuild_rollup_from_events, DAY_MS, HOUR_MS};
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 14;
+pub const CURRENT_SCHEMA_VERSION: i64 = 15;
 
 const SCHEMA_V1_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -240,6 +240,10 @@ pub fn run_migrations(conn: &mut Connection) -> CoreResult<()> {
 
     if current_version < 14 {
         migrate_v13_to_v14(conn, now_ms)?;
+    }
+
+    if current_version < 15 {
+        migrate_v14_to_v15(conn, now_ms)?;
     }
 
     seed_defaults(conn, now_ms)?;
@@ -1063,6 +1067,25 @@ fn migrate_v13_to_v14(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
     Ok(())
 }
 
+fn migrate_v14_to_v15(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
+    let tx = conn.transaction()?;
+
+    add_column_if_missing(
+        &tx,
+        "app_preferences",
+        "background_cli_quota_poll",
+        "INTEGER NOT NULL DEFAULT 1",
+    )?;
+    add_column_if_missing(&tx, "provider_configs", "cli_auth_paused_reason", "TEXT")?;
+
+    tx.execute(
+        "INSERT INTO schema_migrations (version, applied_at_ms) VALUES (?1, ?2)",
+        params![15i64, now_ms],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 fn seed_defaults(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
     let tx = conn.transaction()?;
 
@@ -1121,8 +1144,8 @@ fn seed_defaults(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
              otlp_enabled, otlp_port, device_display_name,
              bg_mode, bg_image_path, bg_preset_id, bg_opacity, bg_blur_px,
              auto_sync_pricing, exchange_rate_auto, last_rate_sync_at_ms, last_pricing_sync_at_ms,
-             auto_check_updates, floating_window_enabled, updated_at_ms)
-        VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+             auto_check_updates, floating_window_enabled, background_cli_quota_poll, updated_at_ms)
+        VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
         "#,
         params![
             prefs.currency.as_str(),
@@ -1144,6 +1167,7 @@ fn seed_defaults(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
             prefs.last_pricing_sync_at_ms,
             i64::from(prefs.auto_check_updates),
             i64::from(prefs.floating_window_enabled),
+            i64::from(prefs.background_cli_quota_poll),
             now_ms,
         ],
     )?;

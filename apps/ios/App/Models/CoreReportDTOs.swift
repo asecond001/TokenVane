@@ -165,6 +165,7 @@ public struct AppPreferencesDTO: Codable, Equatable, Sendable {
     public var lastSubscriptionSyncAtMs: Int64?
     public var autoCheckUpdates: Bool
     public var floatingWindowEnabled: Bool
+    public var backgroundCliQuotaPoll: Bool
     public var updatedAtMs: Int64
 
     enum CodingKeys: String, CodingKey {
@@ -188,6 +189,7 @@ public struct AppPreferencesDTO: Codable, Equatable, Sendable {
         case lastSubscriptionSyncAtMs = "last_subscription_sync_at_ms"
         case autoCheckUpdates = "auto_check_updates"
         case floatingWindowEnabled = "floating_window_enabled"
+        case backgroundCliQuotaPoll = "background_cli_quota_poll"
         case updatedAtMs = "updated_at_ms"
     }
 
@@ -213,6 +215,7 @@ public struct AppPreferencesDTO: Codable, Equatable, Sendable {
         self.lastSubscriptionSyncAtMs = try container.decodeIfPresent(Int64.self, forKey: .lastSubscriptionSyncAtMs)
         self.autoCheckUpdates = try container.decode(Bool.self, forKey: .autoCheckUpdates)
         self.floatingWindowEnabled = try container.decodeIfPresent(Bool.self, forKey: .floatingWindowEnabled) ?? false
+        self.backgroundCliQuotaPoll = try container.decodeIfPresent(Bool.self, forKey: .backgroundCliQuotaPoll) ?? true
         self.updatedAtMs = try container.decodeIfPresent(Int64.self, forKey: .updatedAtMs) ?? 0
     }
 }

@@ -534,11 +534,15 @@ pub fn parse_antigravity_cli_usage_output(
 // `agy` probe guard
 //
 // When `agy -p /usage` cannot refresh its Google OAuth token silently (offline, DNS failure,
-// broken proxy), the CLI falls back to an *interactive* OAuth flow and opens the system browser
-// on the Google sign-in page. Probing repeatedly in that state pops a browser window (stealing
-// focus from full-screen apps) on every poll. Two guards prevent that:
-//   1. a cheap reachability check of Google's OAuth host before every spawn, and
-//   2. an exponential backoff after any failed probe, reset by success or an explicit user sync.
+// broken proxy, unauthenticated, or `invalid_grant`), the CLI falls back to an *interactive*
+// OAuth flow and opens the system browser on the Google sign-in page. Probing repeatedly in
+// that state pops a browser window (stealing focus from full-screen apps) and spawns `conhost.exe`
+// + ephemeral loopback ports on every poll. Multiple guards prevent that:
+//   1. `NO_BROWSER=true`, `CI=true`, `TERM=dumb`, `BROWSER` removed + isolated probe cwd;
+//   2. an immediate auth-pause state when any auth/interactive/timeout failure occurs, reset
+//      only by an explicit user sync or CLI login;
+//   3. a cheap reachability check of Google's OAuth host before every spawn; and
+//   4. exponential backoff (30 min doubling, 6 h cap) after other transient failures.
 // ---------------------------------------------------------------------------------------------
 
 /// Public OAuth host the `agy` CLI must reach to refresh its token silently.
@@ -548,14 +552,45 @@ const AGY_BACKOFF_MAX: Duration = Duration::from_secs(6 * 3_600);
 
 #[derive(Debug, Default)]
 struct AgyProbeBackoff {
+    auth_paused: bool,
     consecutive_failures: u32,
     retry_after: Option<std::time::Instant>,
 }
 
 static AGY_BACKOFF: Mutex<AgyProbeBackoff> = Mutex::new(AgyProbeBackoff {
+    auth_paused: false,
     consecutive_failures: 0,
     retry_after: None,
 });
+
+/// Dedicated private working directory for `agy` probes so project-level files cannot affect it.
+fn agy_probe_dir() -> CollectorResult<PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(|p| PathBuf::from(p).join("TokenVane"))
+        .or_else(|| user_home_dir().map(|h| h.join(".tokenvane")))
+        .ok_or_else(|| CollectorError::Compliance("无法定位 TokenVane 本地数据目录".to_string()))?;
+    let dir = base.join("agy-probe");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| CollectorError::Compliance(format!("创建 agy CLI 探测目录失败: {e}")))?;
+    Ok(dir)
+}
+
+/// Detect auth, interactive login, OAuth, or timeout errors that require manual sign-in rather
+/// than automated background retries.
+pub(crate) fn is_agy_auth_or_interactive_error(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    lower.contains("not signed in")
+        || lower.contains("not logged in")
+        || lower.contains("unauthenticated")
+        || lower.contains("unauthorized")
+        || lower.contains("invalid_grant")
+        || lower.contains("oauth")
+        || lower.contains("accounts.google.com")
+        || msg.contains("完成账号登录")
+        || msg.contains("请先在终端运行 agy")
+        || msg.contains("登录")
+        || msg.contains("超时")
+}
 
 /// Backoff applied after `failures` consecutive failed `agy` probes (30 min doubling, 6 h cap).
 pub(crate) fn agy_backoff_delay(failures: u32) -> Duration {
@@ -570,11 +605,15 @@ pub(crate) fn agy_backoff_delay(failures: u32) -> Duration {
         .map_or(AGY_BACKOFF_MAX, |d| d.min(AGY_BACKOFF_MAX))
 }
 
-/// Clear the failure backoff so the next probe runs immediately (explicit user sync).
+/// Clear the failure backoff and auth-pause state so the next probe runs immediately (explicit user sync/login).
 pub fn reset_agy_probe_backoff() {
     if let Ok(mut guard) = AGY_BACKOFF.lock() {
         *guard = AgyProbeBackoff::default();
     }
+}
+
+fn agy_auth_paused() -> bool {
+    AGY_BACKOFF.lock().map(|g| g.auth_paused).unwrap_or(false)
 }
 
 fn agy_backoff_remaining() -> Option<Duration> {
@@ -583,14 +622,22 @@ fn agy_backoff_remaining() -> Option<Duration> {
     until.checked_duration_since(std::time::Instant::now())
 }
 
-fn record_agy_probe_result(success: bool) {
+fn record_agy_probe_result(err_msg: Option<&str>) {
     if let Ok(mut guard) = AGY_BACKOFF.lock() {
-        if success {
-            *guard = AgyProbeBackoff::default();
-        } else {
-            guard.consecutive_failures = guard.consecutive_failures.saturating_add(1);
-            guard.retry_after =
-                Some(std::time::Instant::now() + agy_backoff_delay(guard.consecutive_failures));
+        match err_msg {
+            None => {
+                *guard = AgyProbeBackoff::default();
+            }
+            Some(msg) if is_agy_auth_or_interactive_error(msg) => {
+                guard.auth_paused = true;
+                guard.consecutive_failures = guard.consecutive_failures.saturating_add(1);
+                guard.retry_after = None;
+            }
+            Some(_) => {
+                guard.consecutive_failures = guard.consecutive_failures.saturating_add(1);
+                guard.retry_after =
+                    Some(std::time::Instant::now() + agy_backoff_delay(guard.consecutive_failures));
+            }
         }
     }
 }
@@ -610,8 +657,9 @@ async fn agy_auth_host_reachable() -> bool {
 
 /// Non-interactively invoke the documented official Antigravity CLI (`agy -p "/usage" --output-format json`).
 ///
-/// Guarded so a degraded network never makes `agy` open its interactive browser sign-in: the
-/// probe is skipped while Google's OAuth host is unreachable or while a failure backoff is active.
+/// Guarded so a degraded network or unauthenticated CLI never makes `agy` open its interactive
+/// browser sign-in: the probe is skipped while auth-paused, while a failure backoff is active, or
+/// while Google's OAuth host is unreachable.
 pub async fn collect_antigravity_cli_usage(
     now_ms: i64,
 ) -> CollectorResult<(ProviderBalanceSnapshot, Vec<ObservedRateLimitWindow>)> {
@@ -621,6 +669,12 @@ pub async fn collect_antigravity_cli_usage(
         )
     })?;
 
+    if agy_auth_paused() {
+        return Err(CollectorError::Compliance(
+            "agy CLI 未登录或授权待恢复，已暂停自动探测；请在「用量」手动登录并点击同步"
+                .to_string(),
+        ));
+    }
     if let Some(remaining) = agy_backoff_remaining() {
         let minutes = remaining.as_secs().div_ceil(60).max(1);
         return Err(CollectorError::Compliance(format!(
@@ -634,7 +688,10 @@ pub async fn collect_antigravity_cli_usage(
     }
 
     let result = collect_antigravity_cli_usage_from(bin_path, now_ms).await;
-    record_agy_probe_result(result.is_ok());
+    match &result {
+        Ok(_) => record_agy_probe_result(None),
+        Err(err) => record_agy_probe_result(Some(&err.to_string())),
+    }
     result
 }
 
@@ -683,39 +740,22 @@ struct CliProcessOutput {
 }
 
 fn run_agy_cli_blocking(bin_path: &Path) -> CollectorResult<CliProcessOutput> {
-    let is_cmd_wrapper = bin_path
-        .extension()
-        .and_then(|s| s.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"));
-
-    let mut cmd = if is_cmd_wrapper {
-        let mut c = std::process::Command::new("cmd.exe");
-        c.arg("/d")
-            .arg("/s")
-            .arg("/c")
-            .arg(bin_path)
-            .args(["-p", "/usage", "--output-format", "json"]);
-        c
-    } else {
-        let mut c = std::process::Command::new(bin_path);
-        c.args(["-p", "/usage", "--output-format", "json"]);
-        c
-    };
-
-    cmd.stdin(Stdio::null())
+    let cwd = agy_probe_dir()?;
+    // Rust std >= 1.77 executes `.cmd` / `.bat` wrappers via `cmd.exe` with safe quoting.
+    let mut cmd = std::process::Command::new(bin_path);
+    cmd.args(["-p", "/usage", "--output-format", "json"])
+        .current_dir(&cwd)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // CREATE_NO_WINDOW prevents flashing a console window during background desktop polling
-        cmd.creation_flags(0x0800_0000);
-    }
+    crate::cli_process::apply_headless_no_browser_env(&mut cmd);
+    crate::cli_process::configure_hidden_cli_command(&mut cmd);
 
     let mut child = cmd
         .spawn()
         .map_err(|e| CollectorError::Compliance(format!("启动 agy CLI 失败: {e}")))?;
+    let job_guard = crate::cli_process::ChildProcessGuard::attach(&child);
 
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
@@ -742,6 +782,7 @@ fn run_agy_cli_blocking(bin_path: &Path) -> CollectorResult<CliProcessOutput> {
                 Ok(Some(st)) => break Ok(st),
                 Ok(None) => {
                     if std::time::Instant::now() >= deadline {
+                        job_guard.terminate_tree();
                         let _ = child.kill();
                         let _ = child.wait();
                         break Err(CollectorError::Compliance(
@@ -752,6 +793,7 @@ fn run_agy_cli_blocking(bin_path: &Path) -> CollectorResult<CliProcessOutput> {
                     std::thread::sleep(Duration::from_millis(40));
                 }
                 Err(e) => {
+                    job_guard.terminate_tree();
                     let _ = child.kill();
                     let _ = child.wait();
                     break Err(CollectorError::Compliance(format!(
@@ -765,6 +807,9 @@ fn run_agy_cli_blocking(bin_path: &Path) -> CollectorResult<CliProcessOutput> {
         let err_b = stderr_handle.join().unwrap_or_default();
         (status, out_b, err_b)
     });
+
+    // Ensure any lingering sidecars (e.g. loopback listeners) are terminated once pipes are drained.
+    drop(job_guard);
 
     let status = status?;
     Ok(CliProcessOutput {
@@ -1602,5 +1647,33 @@ mod tests {
         )
         .expect_err("error status must fail");
         assert!(err.to_string().contains("Not signed in"));
+    }
+
+    #[test]
+    fn agy_auth_pause_detects_auth_or_timeout_errors_and_resets_on_explicit_sync() {
+        assert!(is_agy_auth_or_interactive_error("agy CLI 返回状态 ERROR: Not signed in"));
+        assert!(is_agy_auth_or_interactive_error("oauth invalid_grant from accounts.google.com"));
+        assert!(is_agy_auth_or_interactive_error("调用官方 agy CLI /usage 超时（>25s）"));
+        assert!(is_agy_auth_or_interactive_error("请先在终端运行 agy 完成账号登录以获取配额读数"));
+        assert!(!is_agy_auth_or_interactive_error("temporary dns lookup failure"));
+
+        reset_agy_probe_backoff();
+        assert!(!agy_auth_paused());
+        assert!(agy_backoff_remaining().is_none());
+
+        // Transient non-auth error sets exponential backoff without permanent auth pause
+        record_agy_probe_result(Some("temporary 503 service unavailable"));
+        assert!(!agy_auth_paused());
+        assert!(agy_backoff_remaining().is_some());
+
+        // Auth / timeout error immediately sets auth_paused
+        record_agy_probe_result(Some("agy CLI 返回状态 ERROR: Not signed in"));
+        assert!(agy_auth_paused());
+        assert!(agy_backoff_remaining().is_none());
+
+        // Explicit user sync / login clears both auth_paused and backoff
+        reset_agy_probe_backoff();
+        assert!(!agy_auth_paused());
+        assert!(agy_backoff_remaining().is_none());
     }
 }

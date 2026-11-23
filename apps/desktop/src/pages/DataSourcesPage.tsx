@@ -876,6 +876,20 @@ export function DataSourcesPage() {
                       >
                         agy CLI 授权
                       </span>
+                      <span
+                        className="px-1.5 py-0.5 rounded-md text-[10.5px]"
+                        style={{
+                          backgroundColor: 'var(--bg-hover)',
+                          border: '1px solid var(--border-hairline)',
+                          color: (bootstrap?.preferences.background_cli_quota_poll ?? true)
+                            ? 'var(--accent-emerald)'
+                            : 'var(--text-muted)',
+                        }}
+                      >
+                        {(bootstrap?.preferences.background_cli_quota_poll ?? true)
+                          ? '后台静默轮询'
+                          : '手动按需刷新'}
+                      </span>
                     </div>
                     <button
                       type="button"
