@@ -340,6 +340,20 @@ pub async fn upsert_subscription_plan(
 }
 
 #[tauri::command]
+pub async fn set_subscription_plan_enabled(
+    state: State<'_, AppState>,
+    plan_id: String,
+    enabled: bool,
+) -> Result<(), IpcError> {
+    run_storage(&state, move |s| {
+        Ok(s.set_subscription_plan_enabled(&plan_id, enabled)?)
+    })
+    .await?;
+    state.sync_client.notify_local_change();
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn delete_subscription_plan(
     state: State<'_, AppState>,
     plan_id: String,

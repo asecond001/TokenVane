@@ -292,6 +292,97 @@ describe('Bug fixes verification: Overview today shares, Kimi QUOTA display & Li
     });
   });
 
+  it('lets the user pick a catalog tier and pauses a plan without customizing it', async () => {
+    const now = Date.now();
+    const autoPlan: SubscriptionPlanStatus = {
+      plan: {
+        plan_id: 'auto_kimi_code',
+        provider_id: 'kimi_code',
+        plan_name: 'Kimi Code 会员订阅',
+        enabled: true,
+        monthly_fee_micro_usd: 0,
+        is_user_configured: true,
+        auto_source: 'official_api',
+        updated_at_ms: now,
+        windows: [],
+      },
+      windows: [
+        {
+          window_id: '5h',
+          label: '5h 滚动窗口',
+          duration_hours: 5,
+          rolling: true,
+          unit: 'tokens',
+          used_value: 10,
+          limit_value: 100,
+          used_percent: 10.0,
+          warning_percent: 80,
+          critical_percent: 95,
+          burn_rate_per_hour: 0,
+          projected_exhaustion_hours: null,
+          resets_at_ms: now + 3_600_000,
+          resets_in_seconds: 3_600,
+          source: 'official_api',
+          alert_level: 'normal',
+        },
+      ],
+      today_cost_micro_usd: 0,
+      week_cost_micro_usd: 0,
+      month_cost_micro_usd: 0,
+      month_tokens: 0,
+    };
+    const kimiTiers: SubscriptionPlanTemplate[] = [
+      {
+        template_id: 'kimi_code_plus',
+        provider_id: 'kimi_code',
+        plan_name: 'Kimi Plus (Moderato)',
+        monthly_fee_micro_usd: 19_000_000,
+        windows: [],
+        description: '',
+      },
+      {
+        template_id: 'kimi_code_allegretto',
+        provider_id: 'kimi_code',
+        plan_name: 'Kimi Pro (Allegretto)',
+        monthly_fee_micro_usd: 39_000_000,
+        windows: [],
+        description: '',
+      },
+    ];
+
+    vi.spyOn(ipc, 'getSubscriptions').mockResolvedValue([autoPlan]);
+    vi.spyOn(ipc, 'getObservedRateLimits').mockResolvedValue([]);
+    vi.spyOn(ipc, 'getSubscriptionTemplates').mockResolvedValue(kimiTiers);
+    vi.spyOn(ipc, 'getRemoteSubscriptionSnapshots').mockResolvedValue([]);
+    vi.spyOn(ipc, 'getPaygAccounts').mockResolvedValue([]);
+    vi.spyOn(ipc, 'getProviderConfigs').mockResolvedValue([]);
+    const upsertSpy = vi.spyOn(ipc, 'upsertSubscriptionPlan').mockResolvedValue(undefined);
+    const enableSpy = vi.spyOn(ipc, 'setSubscriptionPlanEnabled').mockResolvedValue(undefined);
+
+    renderWithQuery(<SubscriptionsPage />);
+
+    const picker = (await screen.findByLabelText('Kimi Code 会员订阅 订阅档位')) as HTMLSelectElement;
+    expect(picker.value).toBe('');
+    fireEvent.change(picker, { target: { value: 'kimi_code_allegretto' } });
+
+    await waitFor(() => {
+      expect(upsertSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          plan_id: 'auto_kimi_code',
+          plan_name: 'Kimi Pro (Allegretto)',
+          monthly_fee_micro_usd: 39_000_000,
+          auto_source: 'official_api',
+        })
+      );
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '已启用' }));
+    await waitFor(() => {
+      expect(enableSpy).toHaveBeenCalledWith('auto_kimi_code', false);
+    });
+    expect(upsertSpy).toHaveBeenCalledTimes(1);
+  });
+
   it('renders Kimi Code QUOTA snapshot cleanly in DataSourcesPage', async () => {
     const now = Date.now();
     const configs: ProviderConfig[] = [

@@ -768,7 +768,10 @@ fn auto_subscription_discovery_respects_user_edits_dismissal_and_resets() {
     assert_eq!(subs.len(), 1);
     assert_eq!(subs[0].plan.plan_id, "auto_kimi_code");
     assert_eq!(subs[0].plan.auto_source.as_deref(), Some("official_api"));
-    assert_eq!(subs[0].plan.plan_name, "Kimi Code Allegretto");
+    // The membership level maps onto the catalog tier, so the name and monthly fee both come
+    // from the catalog instead of a hardcoded zero fee.
+    assert_eq!(subs[0].plan.plan_name, "Kimi Pro (Allegretto)");
+    assert_eq!(subs[0].plan.monthly_fee_micro_usd, 39_000_000);
     // Only the 2 API-returned windows (5h, 7d) are shown; no fake local 30d estimate is synthesized.
     assert_eq!(subs[0].windows.len(), 2);
     assert_eq!(subs[0].windows[0].source, "official_api");
@@ -822,7 +825,8 @@ fn auto_subscription_discovery_respects_user_edits_dismissal_and_resets() {
         .query_subscriptions(now_ms + 10_000)
         .expect("revived");
     assert_eq!(revived.len(), 1);
-    assert_eq!(revived[0].plan.plan_name, "Kimi Code Vivace");
+    assert_eq!(revived[0].plan.plan_name, "Kimi Ultra (Vivace)");
+    assert_eq!(revived[0].plan.monthly_fee_micro_usd, 199_000_000);
 
     // 5. User customization preserves custom plan_name while windows keep refreshing from API.
     let mut custom = revived[0].plan.clone();
@@ -849,6 +853,80 @@ fn auto_subscription_discovery_respects_user_edits_dismissal_and_resets() {
     assert_eq!(after_edit[0].plan.plan_name, "我的 Kimi 专享套餐");
     assert_eq!(after_edit[0].plan.monthly_fee_micro_usd, 7_000_000);
     assert!((after_edit[0].windows[0].used_percent - 50.0).abs() < 0.01);
+}
+
+#[test]
+fn kimi_auto_plan_without_level_keeps_zero_fee_and_toggle_keeps_it_auto() {
+    let storage = Storage::open_in_memory().expect("db");
+    let now_ms = Utc::now().timestamp_millis();
+    let window = |name: &str, minutes: i64, pct: f64, observed_at_ms: i64, hint: Option<&str>| {
+        ObservedRateLimitWindow {
+            provider_id: provider_ids::KIMI_CODE.to_string(),
+            window_name: name.to_string(),
+            used_percent: pct,
+            window_minutes: Some(minutes),
+            resets_at_ms: Some(observed_at_ms + 3_600_000),
+            observed_at_ms,
+            source: Some("official_api".to_string()),
+            plan_hint: hint.map(ToString::to_string),
+        }
+    };
+
+    // The usages response carries no membership level: never guess a tier price.
+    storage
+        .upsert_observed_rate_limits(&[
+            window("5h", 300, 10.0, now_ms, None),
+            window("30d", 43_200, 79.0, now_ms, None),
+        ])
+        .expect("observe without level");
+    let subs = storage.query_subscriptions(now_ms).expect("subs");
+    assert_eq!(subs.len(), 1);
+    assert_eq!(subs[0].plan.plan_name, "Kimi Code 会员订阅");
+    assert_eq!(subs[0].plan.monthly_fee_micro_usd, 0);
+
+    // Pausing the plan must not freeze it as user-customized, and polling must not resume it.
+    storage
+        .set_subscription_plan_enabled("auto_kimi_code", false)
+        .expect("pause");
+    storage
+        .upsert_observed_rate_limits(&[window(
+            "5h",
+            300,
+            20.0,
+            now_ms + 1_000,
+            Some("LEVEL_ADVANCED"),
+        )])
+        .expect("poll while paused");
+    let plans = storage.list_subscription_plans().expect("plans");
+    let kimi = plans
+        .iter()
+        .find(|p| p.plan_id == "auto_kimi_code")
+        .expect("kimi plan");
+    assert!(!kimi.enabled);
+    assert_eq!(kimi.plan_name, "Kimi Max (Allegro)");
+    assert_eq!(kimi.monthly_fee_micro_usd, 99_000_000);
+
+    // Resuming keeps following official observations as well.
+    storage
+        .set_subscription_plan_enabled("auto_kimi_code", true)
+        .expect("resume");
+    storage
+        .upsert_observed_rate_limits(&[window(
+            "5h",
+            300,
+            30.0,
+            now_ms + 2_000,
+            Some("LEVEL_BASIC"),
+        )])
+        .expect("poll after resume");
+    let subs = storage.query_subscriptions(now_ms + 2_000).expect("subs");
+    assert!(subs[0].plan.enabled);
+    assert_eq!(subs[0].plan.plan_name, "Kimi Plus (Moderato)");
+    assert_eq!(subs[0].plan.monthly_fee_micro_usd, 19_000_000);
+
+    assert!(storage
+        .set_subscription_plan_enabled("missing_plan", true)
+        .is_err());
 }
 
 #[test]

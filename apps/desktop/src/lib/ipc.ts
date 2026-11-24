@@ -535,6 +535,7 @@ function buildPreviewFallback<T>(command: string, args?: Record<string, unknown>
     case 'import_background_image':
       return ((args?.sourcePath as string | undefined) || 'preview-wallpaper.png') as T;
     case 'delete_subscription_plan':
+    case 'set_subscription_plan_enabled':
     case 'clear_background_image':
       return undefined as T;
     case 'trigger_scan_now':
@@ -859,6 +860,9 @@ export const ipc = {
 
   upsertSubscriptionPlan: (plan: SubscriptionPlan): Promise<void> =>
     callIpc('upsert_subscription_plan', { plan }),
+
+  setSubscriptionPlanEnabled: (planId: string, enabled: boolean): Promise<void> =>
+    callIpc('set_subscription_plan_enabled', { planId, enabled }),
 
   deleteSubscriptionPlan: (planId: string): Promise<void> =>
     callIpc('delete_subscription_plan', { planId }),

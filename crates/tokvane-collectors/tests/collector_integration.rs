@@ -1807,7 +1807,8 @@ async fn kimi_coding_usages_api_and_qcode_auto_materialize_subscriptions() {
         .expect("kimi auto sub present");
     assert_eq!(kimi_sub.plan.plan_id, "auto_kimi_code");
     assert_eq!(kimi_sub.plan.auto_source.as_deref(), Some("official_api"));
-    assert_eq!(kimi_sub.plan.plan_name, "Kimi Code Allegretto");
+    assert_eq!(kimi_sub.plan.plan_name, "Kimi Pro (Allegretto)");
+    assert_eq!(kimi_sub.plan.monthly_fee_micro_usd, 39_000_000);
     assert_eq!(kimi_sub.windows.len(), 2);
 
     let qcode_sub = subs

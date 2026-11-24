@@ -170,6 +170,29 @@ impl Storage {
         })
     }
 
+    /// Flip a plan's `enabled` flag only. Unlike [`Self::upsert_subscription_plan`] this does not
+    /// mark an auto-discovered plan as user-customized, so its tier name, fee and windows keep
+    /// following official observations after the user pauses or resumes it.
+    pub fn set_subscription_plan_enabled(&self, plan_id: &str, enabled: bool) -> CoreResult<()> {
+        let trimmed = plan_id.trim();
+        if trimmed.is_empty() {
+            return Err(CoreError::Validation("plan_id cannot be empty".to_string()));
+        }
+        let now_ms = Utc::now().timestamp_millis();
+        self.with_conn_mut(|conn| {
+            let changed = conn.execute(
+                "UPDATE subscription_plans SET enabled = ?2, updated_at_ms = ?3 WHERE plan_id = ?1",
+                params![trimmed, i64::from(enabled), now_ms],
+            )?;
+            if changed == 0 {
+                return Err(CoreError::Validation(format!(
+                    "subscription plan {trimmed} not found"
+                )));
+            }
+            Ok(())
+        })
+    }
+
     pub fn delete_subscription_plan(&self, plan_id: &str) -> CoreResult<()> {
         let trimmed = plan_id.trim();
         if trimmed.is_empty() {
@@ -773,6 +796,20 @@ pub(super) fn infer_window_rule_from_observed(
     }
 }
 
+/// Map a Kimi Code membership level (from the official `/coding/v1/usages` response) onto the
+/// catalog tier it corresponds to. Returns `None` for an empty or unrecognised level.
+fn kimi_template_for_hint(hint_lower: &str) -> Option<&'static str> {
+    match hint_lower.trim() {
+        "level_basic" | "basic" | "moderato" | "plus" => Some("kimi_code_plus"),
+        "level_intermediate" | "intermediate" | "allegretto" | "pro" => {
+            Some("kimi_code_allegretto")
+        }
+        "level_advanced" | "advanced" | "allegro" | "max" => Some("kimi_code_max"),
+        "level_max" | "vivace" | "ultra" => Some("kimi_code_ultra"),
+        _ => None,
+    }
+}
+
 pub(crate) fn sync_auto_subscription_for_provider_conn(
     conn: &Connection,
     provider_id: &str,
@@ -953,31 +990,10 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
                     tpl.template_id == "google_ai_pro"
                 }
                 provider_ids::ANTIGRAVITY => false,
-                provider_ids::KIMI_CODE
-                    if matches!(
-                        hint_lower.as_str(),
-                        "level_max" | "vivace" | "ultra"
-                    ) =>
-                {
-                    tpl.template_id == "kimi_code_ultra"
+                provider_ids::KIMI_CODE => {
+                    tpl.template_id
+                        == kimi_template_for_hint(&hint_lower).unwrap_or("kimi_code_allegretto")
                 }
-                provider_ids::KIMI_CODE
-                    if matches!(
-                        hint_lower.as_str(),
-                        "level_advanced" | "allegro" | "max"
-                    ) =>
-                {
-                    tpl.template_id == "kimi_code_max"
-                }
-                provider_ids::KIMI_CODE
-                    if matches!(
-                        hint_lower.as_str(),
-                        "level_basic" | "basic" | "moderato" | "plus"
-                    ) =>
-                {
-                    tpl.template_id == "kimi_code_plus"
-                }
-                provider_ids::KIMI_CODE => tpl.template_id == "kimi_code_allegretto",
                 _ => true,
             }
     });
@@ -1109,20 +1125,14 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
                 ("Antigravity 官方配额".to_string(), 0)
             }
         }
-        provider_ids::KIMI_CODE => {
-            let name = match hint_lower.as_str() {
-                "level_basic" | "basic" => "Kimi Code 基础会员",
-                "plus" | "moderato" => "Kimi Plus (Moderato)",
-                "level_intermediate" | "allegretto" => "Kimi Code Allegretto",
-                "pro" => "Kimi Pro (Allegretto)",
-                "level_advanced" => "Kimi Code Moderato",
-                "allegro" => "Kimi Max (Allegro)",
-                "level_max" | "vivace" | "max" => "Kimi Code Vivace",
-                "ultra" => "Kimi Ultra (Vivace)",
-                _ => "Kimi Code 会员订阅",
-            };
-            (name.to_string(), 0)
-        }
+        provider_ids::KIMI_CODE => match (kimi_template_for_hint(&hint_lower), preferred_tpl) {
+            // A recognised membership level maps 1:1 onto a catalog tier: take both the tier name
+            // and its monthly fee from the catalog so they never drift apart.
+            (Some(_), Some(tpl)) => (tpl.plan_name.clone(), tpl.monthly_fee_micro_usd),
+            // The usages response carries no level: keep a neutral name and no fee so the user
+            // picks the tier explicitly instead of us guessing a price.
+            _ => ("Kimi Code 会员订阅".to_string(), 0),
+        },
         provider_ids::MINIMAX_CODE => {
             if hint_lower.contains("max") {
                 ("MiniMax Coding Max".to_string(), 0)
@@ -1157,7 +1167,6 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
         VALUES (?1, ?2, ?3, 1, ?4, ?5, 1, ?6, 0, 0, ?7)
         ON CONFLICT(plan_id) DO UPDATE SET
             plan_name = excluded.plan_name,
-            enabled = 1,
             monthly_fee_micro_usd = excluded.monthly_fee_micro_usd,
             windows_json = excluded.windows_json,
             is_user_configured = 1,

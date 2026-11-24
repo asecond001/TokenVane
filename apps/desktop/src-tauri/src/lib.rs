@@ -70,6 +70,7 @@ pub fn run() {
             commands::sync_pricing_and_rate,
             commands::get_subscriptions,
             commands::upsert_subscription_plan,
+            commands::set_subscription_plan_enabled,
             commands::delete_subscription_plan,
             commands::get_subscription_templates,
             commands::get_observed_rate_limits,

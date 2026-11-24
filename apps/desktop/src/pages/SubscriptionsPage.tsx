@@ -23,6 +23,7 @@ import type {
   PaygAccountStatus,
   RemoteSubscriptionSnapshot,
   SubscriptionPlanStatus,
+  SubscriptionPlanTemplate,
 } from '../types/ipc';
 import { CLOCK_REFRESH_MS } from '../lib/liveRefresh';
 
@@ -317,6 +318,23 @@ export function SubscriptionsPage() {
     refetchInterval: CLOCK_REFRESH_MS,
   });
 
+  const { data: planTemplates = [] } = useQuery({
+    queryKey: ['subscription_templates'],
+    queryFn: () => ipc.getSubscriptionTemplates(),
+    staleTime: 5 * 60_000,
+  });
+
+  const templatesByProvider = useMemo(() => {
+    const grouped = new Map<string, SubscriptionPlanTemplate[]>();
+    for (const tpl of Array.isArray(planTemplates) ? planTemplates : []) {
+      const key = tpl.provider_id.toLowerCase();
+      const list = grouped.get(key) ?? [];
+      list.push(tpl);
+      grouped.set(key, list);
+    }
+    return grouped;
+  }, [planTemplates]);
+
   const { data: observedRateLimits = [] } = useQuery({
     queryKey: ['observed_rate_limits'],
     queryFn: () => ipc.getObservedRateLimits(),
@@ -411,9 +429,18 @@ export function SubscriptionsPage() {
 
   const toggleQuotaMutation = useMutation({
     mutationFn: (status: SubscriptionPlanStatus) =>
+      ipc.setSubscriptionPlanEnabled(status.plan.plan_id, !status.plan.enabled),
+    onSuccess: async () => {
+      await invalidateUsageQueries();
+    },
+  });
+
+  const applyTierMutation = useMutation({
+    mutationFn: ({ status, tpl }: { status: SubscriptionPlanStatus; tpl: SubscriptionPlanTemplate }) =>
       ipc.upsertSubscriptionPlan({
         ...status.plan,
-        enabled: !status.plan.enabled,
+        plan_name: tpl.plan_name,
+        monthly_fee_micro_usd: tpl.monthly_fee_micro_usd,
         is_user_configured: true,
       }),
     onSuccess: async () => {
@@ -785,6 +812,12 @@ export function SubscriptionsPage() {
                   const { plan, windows } = status;
                   const confirmingDelete = confirmDeleteQuotaId === plan.plan_id;
                   const autoBadge = autoSourceBadge(plan.auto_source);
+                  const tierOptions = templatesByProvider.get(plan.provider_id.toLowerCase()) ?? [];
+                  const selectedTier = tierOptions.find(
+                    (tpl) =>
+                      tpl.plan_name === plan.plan_name &&
+                      tpl.monthly_fee_micro_usd === plan.monthly_fee_micro_usd
+                  );
 
                   return (
                     <div
@@ -831,6 +864,40 @@ export function SubscriptionsPage() {
                           <span>
                             {resolveSubscriptionTierLabel(plan, currency, usdToCnyRate, true)}
                           </span>
+                          {tierOptions.length > 0 && (
+                            <select
+                              aria-label={`${plan.plan_name} 订阅档位`}
+                              value={selectedTier?.template_id ?? ''}
+                              disabled={applyTierMutation.isPending}
+                              onChange={(e) => {
+                                const tpl = tierOptions.find(
+                                  (t) => t.template_id === e.target.value
+                                );
+                                if (tpl) {
+                                  applyTierMutation.mutate({ status, tpl });
+                                }
+                              }}
+                              className="px-1.5 py-0.5 text-[11px] rounded-lg outline-none cursor-pointer tabular-nums disabled:opacity-50"
+                              style={{
+                                backgroundColor: 'var(--bg-input)',
+                                border: '1px solid var(--border-subtle)',
+                                color: 'var(--text-primary)',
+                              }}
+                            >
+                              {!selectedTier && (
+                                <option value="" disabled>
+                                  选择档位
+                                </option>
+                              )}
+                              {tierOptions.map((tpl) => (
+                                <option key={tpl.template_id} value={tpl.template_id}>
+                                  {tpl.monthly_fee_micro_usd > 0
+                                    ? `${tpl.plan_name} · ${formatCost(tpl.monthly_fee_micro_usd, currency, usdToCnyRate)}`
+                                    : tpl.plan_name}
+                                </option>
+                              ))}
+                            </select>
+                          )}
                           <button
                             type="button"
                             onClick={() => toggleQuotaMutation.mutate(status)}
