@@ -73,6 +73,56 @@ fn compute_usage_percent_from_obj(obj: &Value) -> Option<f64> {
     None
 }
 
+/// Kimi Code accounts below this `user_level` are free accounts without a paid coding plan
+/// (the official Kimi Code CLI applies the same threshold).
+const KIMI_FREE_USER_LEVEL_BELOW: i64 = 30;
+
+/// Extract the membership plan from the Kimi Code profile response (`/coding/v1/me`).
+///
+/// Only `user_level_name` / `user_level` are read; every other profile field (nickname, phone,
+/// avatar, identifiers) is ignored and never stored. Returns the plan name as reported (e.g.
+/// `"Allegretto"`), `"Free"` for free accounts, or `None` when the payload carries no level.
+pub fn parse_kimi_user_level(body: &Value) -> Option<String> {
+    let profile = body.get("data").filter(|d| d.is_object()).unwrap_or(body);
+    let name = profile
+        .get("user_level_name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(name) = name {
+        return Some(name.to_string());
+    }
+    let level = profile.get("user_level").and_then(|v| {
+        v.as_i64()
+            .or_else(|| v.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
+    })?;
+    (level < KIMI_FREE_USER_LEVEL_BELOW).then(|| "Free".to_string())
+}
+
+/// Source tag of the hidden `tier_hint` observation carrying the Kimi Code plan level read from
+/// the profile endpoint. A level from this source is authoritative and overrides a manual tier
+/// pick in the auto-discovered subscription.
+pub const KIMI_PROFILE_HINT_SOURCE: &str = "official_profile";
+
+/// Build the hidden `tier_hint` observation that carries a Kimi Code plan level. It is never
+/// shown as a quota window; it only feeds tier and monthly-fee detection.
+pub fn kimi_profile_tier_hint(
+    provider_id: &str,
+    level: &str,
+    now_ms: i64,
+) -> ObservedRateLimitWindow {
+    ObservedRateLimitWindow {
+        provider_id: provider_id.to_string(),
+        window_name: "tier_hint".to_string(),
+        used_percent: 0.0,
+        window_minutes: None,
+        resets_at_ms: None,
+        observed_at_ms: now_ms,
+        source: Some(KIMI_PROFILE_HINT_SOURCE.to_string()),
+        plan_hint: Some(level.to_string()),
+    }
+}
+
 /// Parse Kimi Coding Plan (`/coding/v1/usages`) usage response into a balance snapshot and rate-limit windows.
 pub fn parse_kimi_coding_usages(
     body: &Value,

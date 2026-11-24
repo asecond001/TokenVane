@@ -1724,6 +1724,20 @@ async fn kimi_coding_usages_api_and_qcode_auto_materialize_subscriptions() {
         .expect("set qcode key");
 
     let mut responses = HashMap::new();
+    // Profile endpoint: only the plan level may be read; the other fields must be ignored.
+    responses.insert(
+        "https://api.kimi.com/coding/v1/me".to_string(),
+        (
+            200,
+            serde_json::json!({
+                "user_id": "u-test",
+                "nickname": "tester",
+                "user_level": 50,
+                "user_level_name": "Allegro"
+            })
+            .to_string(),
+        ),
+    );
     responses.insert(
         endpoints.kimi_coding_url.clone(),
         (
@@ -1807,8 +1821,9 @@ async fn kimi_coding_usages_api_and_qcode_auto_materialize_subscriptions() {
         .expect("kimi auto sub present");
     assert_eq!(kimi_sub.plan.plan_id, "auto_kimi_code");
     assert_eq!(kimi_sub.plan.auto_source.as_deref(), Some("official_api"));
-    assert_eq!(kimi_sub.plan.plan_name, "Kimi Pro (Allegretto)");
-    assert_eq!(kimi_sub.plan.monthly_fee_micro_usd, 39_000_000);
+    // The profile level wins over the legacy usages hint.
+    assert_eq!(kimi_sub.plan.plan_name, "Kimi Max (Allegro)");
+    assert_eq!(kimi_sub.plan.monthly_fee_micro_usd, 99_000_000);
     assert_eq!(kimi_sub.windows.len(), 2);
 
     let qcode_sub = subs

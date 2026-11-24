@@ -4,9 +4,10 @@ use rust_decimal::{Decimal, RoundingStrategy};
 pub mod balance_parsers;
 pub mod remote_sync;
 pub use balance_parsers::{
-    parse_deepseek_balance, parse_kimi_coding_usages, parse_minimax_remains,
-    parse_moonshot_balance, parse_official_balance_payload, parse_qcode_usage,
-    OfficialBalanceApplyResult,
+    kimi_profile_tier_hint, parse_deepseek_balance, parse_kimi_coding_usages,
+    parse_kimi_user_level, parse_minimax_remains, parse_moonshot_balance,
+    parse_official_balance_payload, parse_qcode_usage, OfficialBalanceApplyResult,
+    KIMI_PROFILE_HINT_SOURCE,
 };
 pub use remote_sync::{
     compute_catalog_hash, format_exchange_rate, parse_litellm_catalog, parse_models_dev_catalog,
@@ -301,6 +302,30 @@ pub fn convert_micro_usd_to_currency(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn kimi_user_level_reads_plan_name_and_free_threshold_only() {
+        use super::parse_kimi_user_level;
+        use serde_json::json;
+
+        let paid = json!({
+            "user_id": "u-1",
+            "nickname": "someone",
+            "user_level": 40,
+            "user_level_name": " Allegretto "
+        });
+        assert_eq!(parse_kimi_user_level(&paid).as_deref(), Some("Allegretto"));
+
+        let wrapped = json!({ "data": { "user_level_name": "Vivace" } });
+        assert_eq!(parse_kimi_user_level(&wrapped).as_deref(), Some("Vivace"));
+
+        let free_by_number = json!({ "user_level": 10, "user_level_name": "" });
+        assert_eq!(parse_kimi_user_level(&free_by_number).as_deref(), Some("Free"));
+
+        let unknown_paid_number = json!({ "user_level": "45" });
+        assert_eq!(parse_kimi_user_level(&unknown_paid_number), None);
+        assert_eq!(parse_kimi_user_level(&json!({})), None);
+    }
+
     use super::*;
     use std::str::FromStr;
 

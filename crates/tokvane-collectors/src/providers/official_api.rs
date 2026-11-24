@@ -9,7 +9,9 @@ use serde_json::Value;
 use tokvane_core::domain::{
     provider_ids, ObservedRateLimitWindow, ProviderBalanceSnapshot,
 };
-use tokvane_core::pricing::parse_official_balance_payload;
+use tokvane_core::pricing::{
+    kimi_profile_tier_hint, parse_kimi_user_level, parse_official_balance_payload,
+};
 use tokvane_core::Storage;
 
 use crate::credentials::CredentialManager;
@@ -532,6 +534,10 @@ pub async fn refresh_provider_balance_with_fetcher_inner(
         }
     };
 
+    if provider_id == provider_ids::KIMI_CODE && selected_endpoint == endpoints.kimi_coding_url {
+        refresh_kimi_plan_level(storage, fetcher, &selected_endpoint, &api_key, now_ms).await;
+    }
+
     let (snapshot, rate_limits) =
         parse_official_balance_payload(provider_id, &selected_endpoint, &body, now_ms)
             .map_err(|e| CollectorError::Compliance(e.to_string()))?;
@@ -549,6 +555,43 @@ pub async fn refresh_provider_balance_with_fetcher_inner(
         from_cache: false,
         cooldown_remaining_secs: 0,
     })
+}
+
+/// Kimi Code profile endpoint, a sibling of the usages endpoint (`.../coding/v1/me`).
+fn kimi_profile_url(usages_url: &str) -> String {
+    let base = usages_url.trim_end_matches('/');
+    let base = base.strip_suffix("/usages").unwrap_or(base);
+    format!("{base}/me")
+}
+
+/// Read the Kimi Code plan level from the profile endpoint with the user's own key and store it
+/// as a hidden tier hint. Only `user_level_name` / `user_level` are kept; nickname, phone,
+/// avatar and identifiers are dropped here and never persisted or synced. Best effort: any
+/// failure leaves tier detection to the manual tier picker and never fails the usages refresh.
+async fn refresh_kimi_plan_level(
+    storage: &Storage,
+    fetcher: &dyn AuthHttpFetcher,
+    usages_url: &str,
+    api_key: &str,
+    now_ms: i64,
+) {
+    let Ok((status, raw_body)) = fetcher
+        .fetch_bearer_get(&kimi_profile_url(usages_url), api_key)
+        .await
+    else {
+        return;
+    };
+    if status >= 400 {
+        return;
+    }
+    let Ok(body) = serde_json::from_str::<Value>(&raw_body) else {
+        return;
+    };
+    if let Some(level) = parse_kimi_user_level(&body) {
+        let hint = kimi_profile_tier_hint(provider_ids::KIMI_CODE, &level, now_ms);
+        // Best effort by design (see doc comment): a storage hiccup only delays tier detection.
+        let _ = storage.upsert_observed_rate_limits(&[hint]);
+    }
 }
 
 fn sum_anthropic_buckets(body: &Value) -> (i64, i64) {

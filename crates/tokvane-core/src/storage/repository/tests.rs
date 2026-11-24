@@ -930,6 +930,66 @@ fn kimi_auto_plan_without_level_keeps_zero_fee_and_toggle_keeps_it_auto() {
 }
 
 #[test]
+fn kimi_profile_level_overrides_manual_tier_and_detects_free_accounts() {
+    let storage = Storage::open_in_memory().expect("db");
+    let now_ms = Utc::now().timestamp_millis();
+    storage
+        .upsert_observed_rate_limits(&[ObservedRateLimitWindow {
+            provider_id: provider_ids::KIMI_CODE.to_string(),
+            window_name: "5h".to_string(),
+            used_percent: 10.0,
+            window_minutes: Some(300),
+            resets_at_ms: Some(now_ms + 3_600_000),
+            observed_at_ms: now_ms,
+            source: Some("official_api".to_string()),
+            plan_hint: None,
+        }])
+        .expect("observe window");
+
+    // The user picks a tier by hand while the level is unknown.
+    let mut picked = storage
+        .query_subscriptions(now_ms)
+        .expect("subs")
+        .remove(0)
+        .plan;
+    picked.plan_name = "Kimi Plus (Moderato)".to_string();
+    picked.monthly_fee_micro_usd = 19_000_000;
+    storage.upsert_subscription_plan(&picked).expect("manual pick");
+
+    // The profile endpoint reports the real plan: it replaces the manual pick and the plan
+    // follows official data again.
+    storage
+        .upsert_observed_rate_limits(&[crate::pricing::kimi_profile_tier_hint(
+            provider_ids::KIMI_CODE,
+            "Allegretto",
+            now_ms + 1_000,
+        )])
+        .expect("profile level");
+    let subs = storage.query_subscriptions(now_ms + 1_000).expect("subs");
+    assert_eq!(subs[0].plan.plan_name, "Kimi Pro (Allegretto)");
+    assert_eq!(subs[0].plan.monthly_fee_micro_usd, 39_000_000);
+    // The hint row is never rendered as a quota window.
+    assert!(subs[0].windows.iter().all(|w| w.window_id != "tier_hint"));
+    assert!(storage
+        .list_observed_rate_limits()
+        .expect("observed")
+        .iter()
+        .all(|o| o.window_name != "tier_hint"));
+
+    // A free account carries no coding plan and no fee.
+    storage
+        .upsert_observed_rate_limits(&[crate::pricing::kimi_profile_tier_hint(
+            provider_ids::KIMI_CODE,
+            "Free",
+            now_ms + 2_000,
+        )])
+        .expect("free level");
+    let subs = storage.query_subscriptions(now_ms + 2_000).expect("subs");
+    assert_eq!(subs[0].plan.plan_name, "Kimi Code Free");
+    assert_eq!(subs[0].plan.monthly_fee_micro_usd, 0);
+}
+
+#[test]
 fn v6_migration_cleans_tps_preserves_remote_rollups_and_handles_stream_upgrades() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("v6.sqlite");

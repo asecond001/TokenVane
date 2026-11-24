@@ -1,6 +1,7 @@
 //! Subscription plans, observed rate-limit windows and pay-as-you-go accounts.
 
 use super::*;
+use crate::pricing::KIMI_PROFILE_HINT_SOURCE;
 
 impl Storage {
     pub fn list_observed_rate_limits(&self) -> CoreResult<Vec<ObservedRateLimitWindow>> {
@@ -796,18 +797,32 @@ pub(super) fn infer_window_rule_from_observed(
     }
 }
 
-/// Map a Kimi Code membership level (from the official `/coding/v1/usages` response) onto the
-/// catalog tier it corresponds to. Returns `None` for an empty or unrecognised level.
+/// Map a Kimi Code membership level onto the catalog tier it corresponds to. Accepts the legacy
+/// `LEVEL_*` enums as well as plan names such as `Allegretto` or `Kimi Pro`. Returns `None` for an
+/// empty, free or unrecognised level.
 fn kimi_template_for_hint(hint_lower: &str) -> Option<&'static str> {
-    match hint_lower.trim() {
-        "level_basic" | "basic" | "moderato" | "plus" => Some("kimi_code_plus"),
-        "level_intermediate" | "intermediate" | "allegretto" | "pro" => {
-            Some("kimi_code_allegretto")
-        }
-        "level_advanced" | "advanced" | "allegro" | "max" => Some("kimi_code_max"),
-        "level_max" | "vivace" | "ultra" => Some("kimi_code_ultra"),
-        _ => None,
+    let hint = hint_lower.trim();
+    match hint {
+        "level_basic" | "basic" => return Some("kimi_code_plus"),
+        "level_intermediate" | "intermediate" => return Some("kimi_code_allegretto"),
+        "level_advanced" | "advanced" => return Some("kimi_code_max"),
+        "level_max" => return Some("kimi_code_ultra"),
+        _ => {}
     }
+    hint.split(|c: char| !c.is_ascii_alphanumeric())
+        .find_map(|token| match token {
+            "moderato" | "plus" => Some("kimi_code_plus"),
+            "allegretto" | "pro" => Some("kimi_code_allegretto"),
+            "allegro" | "max" => Some("kimi_code_max"),
+            "vivace" | "ultra" => Some("kimi_code_ultra"),
+            _ => None,
+        })
+}
+
+fn kimi_hint_is_free(hint_lower: &str) -> bool {
+    hint_lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|token| token == "free")
 }
 
 pub(crate) fn sync_auto_subscription_for_provider_conn(
@@ -840,6 +855,30 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
         return Ok(());
     }
 
+    let obs_rows: Vec<ObservedRateLimitWindow> = load_observed_rate_limits(conn)?
+        .into_iter()
+        .filter(|o| o.provider_id.eq_ignore_ascii_case(trimmed))
+        .collect();
+
+    // Kimi Code plan level read from the official profile endpoint (`/coding/v1/me`).
+    let profile_level: Option<String> = obs_rows
+        .iter()
+        .filter(|o| {
+            o.window_name == "tier_hint" && o.source.as_deref() == Some(KIMI_PROFILE_HINT_SOURCE)
+        })
+        .max_by_key(|o| o.observed_at_ms)
+        .and_then(|o| o.plan_hint.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
+    // A recognised official plan level is authoritative: it replaces a manual tier pick, which
+    // is only a fallback for when the level is unknown.
+    let official_level_known = trimmed == provider_ids::KIMI_CODE
+        && profile_level.as_deref().is_some_and(|level| {
+            let lower = level.to_ascii_lowercase();
+            kimi_template_for_hint(&lower).is_some() || kimi_hint_is_free(&lower)
+        });
+
     let auto_plan_id = format!("auto_{trimmed}");
     let existing_flags: Option<(i64, i64)> = conn
         .query_row(
@@ -849,15 +888,10 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
         )
         .optional()?;
     if let Some((dismissed, customized)) = existing_flags {
-        if dismissed != 0 || customized != 0 {
+        if dismissed != 0 || (customized != 0 && !official_level_known) {
             return Ok(());
         }
     }
-
-    let obs_rows: Vec<ObservedRateLimitWindow> = load_observed_rate_limits(conn)?
-        .into_iter()
-        .filter(|o| o.provider_id.eq_ignore_ascii_case(trimmed))
-        .collect();
     if obs_rows.is_empty() && trimmed != provider_ids::ANTIGRAVITY {
         return Ok(());
     }
@@ -895,17 +929,21 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
         "local_log".to_string()
     };
 
-    let plan_hint = obs_rows
-        .iter()
-        .filter_map(|o| {
+    let plan_hint = profile_level
+        .clone()
+        .or_else(|| {
+            obs_rows
+                .iter()
+                .filter_map(|o| {
             o.plan_hint
                 .as_deref()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(|s| (o.observed_at_ms, s.to_string()))
         })
-        .max_by_key(|(ts, _)| *ts)
-        .map(|(_, s)| s)
+                .max_by_key(|(ts, _)| *ts)
+                .map(|(_, s)| s)
+        })
         .or_else(|| {
             if trimmed == provider_ids::ANTIGRAVITY {
                 let mut stmt = conn
@@ -940,7 +978,7 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
 
     let real_obs_rows: Vec<&ObservedRateLimitWindow> = obs_rows
         .iter()
-        .filter(|o| o.source.as_deref() != Some("local_log_hint"))
+        .filter(|o| o.source.as_deref() != Some("local_log_hint") && o.window_name != "tier_hint")
         .collect();
     if trimmed == provider_ids::ANTIGRAVITY && plan_hint.is_none() && real_obs_rows.is_empty() {
         return Ok(());
@@ -1125,6 +1163,9 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
                 ("Antigravity 官方配额".to_string(), 0)
             }
         }
+        provider_ids::KIMI_CODE if kimi_hint_is_free(&hint_lower) => {
+            ("Kimi Code Free".to_string(), 0)
+        }
         provider_ids::KIMI_CODE => match (kimi_template_for_hint(&hint_lower), preferred_tpl) {
             // A recognised membership level maps 1:1 onto a catalog tier: take both the tier name
             // and its monthly fee from the catalog so they never drift apart.
@@ -1171,8 +1212,10 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
             windows_json = excluded.windows_json,
             is_user_configured = 1,
             auto_source = excluded.auto_source,
+            user_customized = 0,
             updated_at_ms = excluded.updated_at_ms
-        WHERE subscription_plans.user_customized = 0 AND subscription_plans.user_dismissed = 0
+        WHERE subscription_plans.user_dismissed = 0
+          AND (subscription_plans.user_customized = 0 OR ?8 = 1)
         "#,
         params![
             auto_plan_id,
@@ -1182,6 +1225,7 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
             windows_json,
             auto_source,
             now_ms,
+            i64::from(official_level_known),
         ],
     )?;
 
