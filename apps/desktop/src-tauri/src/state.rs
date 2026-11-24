@@ -96,6 +96,7 @@ impl AppState {
         let mut quota_rx = tx.subscribe();
         let activity_shutdown_rx = tx.subscribe();
         let (activity_tx, activity_rx) = mpsc::unbounded_channel::<Vec<String>>();
+        let quota_throttle = Arc::new(Mutex::new(ActivityRefreshThrottle::new()));
         let watcher_app = app_handle.clone();
         let coord = self.coordinator.clone();
         let sync_for_watcher = self.sync_client.clone();
@@ -118,6 +119,7 @@ impl AppState {
             Arc::clone(&self.credentials),
             app_handle.clone(),
             self.sync_client.clone(),
+            Arc::clone(&quota_throttle),
             activity_rx,
             activity_shutdown_rx,
         ));
@@ -134,6 +136,7 @@ impl AppState {
         let quota_creds = Arc::clone(&self.credentials);
         let quota_app = app_handle.clone();
         let quota_sync = self.sync_client.clone();
+        let periodic_throttle = Arc::clone(&quota_throttle);
         tauri::async_runtime::spawn(async move {
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(4)) => {}
@@ -142,7 +145,14 @@ impl AppState {
                 }
             }
 
-            poll_configured_provider_apis(&quota_storage, quota_creds.as_ref(), &quota_app, &quota_sync).await;
+            poll_configured_provider_apis(
+                &quota_storage,
+                quota_creds.as_ref(),
+                &quota_app,
+                &quota_sync,
+                &periodic_throttle,
+            )
+            .await;
 
             let mut interval = tokio::time::interval(Duration::from_secs(300));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -151,7 +161,14 @@ impl AppState {
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        poll_configured_provider_apis(&quota_storage, quota_creds.as_ref(), &quota_app, &quota_sync).await;
+                        poll_configured_provider_apis(
+                            &quota_storage,
+                            quota_creds.as_ref(),
+                            &quota_app,
+                            &quota_sync,
+                            &periodic_throttle,
+                        )
+                        .await;
                     }
                     _ = quota_rx.changed() => {
                         if *quota_rx.borrow() {
@@ -313,6 +330,7 @@ async fn poll_configured_provider_apis(
     credentials: &dyn CredentialManager,
     app: &AppHandle,
     sync_client: &SyncClientHandle,
+    throttle: &Arc<Mutex<ActivityRefreshThrottle>>,
 ) {
     let allow_background_cli = storage
         .get_preferences()
@@ -327,6 +345,14 @@ async fn poll_configured_provider_apis(
 
     for cfg in configs {
         if !quota_refresh_available(storage, &cfg, allow_background_cli, fullscreen_busy) {
+            continue;
+        }
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let should_run = throttle
+            .lock()
+            .map(|mut guard| guard.try_start_periodic(&cfg.provider_id, now_ms))
+            .unwrap_or(true);
+        if !should_run {
             continue;
         }
         match tokvane_collectors::refresh_provider_balance(storage, &cfg.provider_id, credentials)
@@ -348,6 +374,9 @@ async fn poll_configured_provider_apis(
             Err(err) => {
                 tracing::debug!("Background API poll warning for {}: {err}", cfg.provider_id);
             }
+        }
+        if let Ok(mut guard) = throttle.lock() {
+            guard.finish(&cfg.provider_id);
         }
     }
 
@@ -451,10 +480,10 @@ async fn run_activity_quota_refresher(
     credentials: Arc<dyn CredentialManager>,
     app: AppHandle,
     sync_client: SyncClientHandle,
+    throttle: Arc<Mutex<ActivityRefreshThrottle>>,
     mut activity_rx: mpsc::UnboundedReceiver<Vec<String>>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
-    let throttle = Arc::new(Mutex::new(ActivityRefreshThrottle::new()));
     let mut tick = tokio::time::interval(Duration::from_secs(5));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 

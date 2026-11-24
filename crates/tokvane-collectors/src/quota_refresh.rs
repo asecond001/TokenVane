@@ -15,6 +15,8 @@ use tokvane_core::domain::provider_ids;
 pub const ACTIVITY_REFRESH_MIN_INTERVAL_MS: i64 = 60_000;
 /// Longer minimum spacing for official CLI subprocess probes (opt-in background polling).
 pub const CLI_ACTIVITY_REFRESH_MIN_INTERVAL_MS: i64 = 300_000;
+/// Minor timer/clock drift tolerance so periodic 5-minute ticks do not skip an entire cycle.
+const PERIODIC_POLL_JITTER_TOLERANCE_MS: i64 = 2_000;
 
 /// How a provider's quota can be refreshed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +78,29 @@ impl ActivityRefreshThrottle {
         }
         self.pending.insert(provider_id.to_string());
         false
+    }
+
+    /// Attempt to start a periodic background refresh if no refresh is currently in flight
+    /// and the provider's minimum refresh interval (minus minor timer jitter) has elapsed.
+    /// Clears any queued trailing activity refresh since this poll covers it; does not enqueue
+    /// if skipped.
+    pub fn try_start_periodic(&mut self, provider_id: &str, now_ms: i64) -> bool {
+        if self.in_flight.contains(provider_id) {
+            return false;
+        }
+        let min_interval = min_interval_ms_for_provider(provider_id)
+            .saturating_sub(PERIODIC_POLL_JITTER_TOLERANCE_MS);
+        let elapsed_ok = self
+            .last_started_ms
+            .get(provider_id)
+            .is_none_or(|last| now_ms.saturating_sub(*last) >= min_interval);
+        if !elapsed_ok {
+            return false;
+        }
+        self.pending.remove(provider_id);
+        self.last_started_ms.insert(provider_id.to_string(), now_ms);
+        self.in_flight.insert(provider_id.to_string());
+        true
     }
 
     /// Drain queued providers whose interval has elapsed and that are not currently refreshing.
@@ -169,5 +194,37 @@ mod tests {
         assert!(t.on_activity(provider_ids::KIMI_CODE, 0));
         assert!(t.on_activity(provider_ids::QCODE, 1_000));
         assert!(!t.on_activity(provider_ids::KIMI_CODE, 2_000));
+    }
+
+    #[test]
+    fn periodic_and_activity_refreshes_share_cli_cooldown_and_in_flight_guard() {
+        let mut t = ActivityRefreshThrottle::new();
+        let pid = provider_ids::ANTIGRAVITY;
+
+        assert!(t.try_start_periodic(pid, 0), "initial periodic poll starts");
+        assert!(
+            !t.on_activity(pid, 1_000),
+            "activity while periodic poll is in flight is queued instead of running concurrently"
+        );
+        t.finish(pid);
+        assert!(
+            !t.on_activity(pid, 84_000),
+            "activity inside 300s CLI cooldown is coalesced instead of double-probing"
+        );
+
+        // Periodic tick arriving within 2s jitter tolerance runs and clears queued trailing work.
+        assert!(t.try_start_periodic(pid, 299_000));
+        t.finish(pid);
+        assert!(
+            t.take_due(300_000).is_empty(),
+            "periodic poll clears pending trailing activity refresh"
+        );
+
+        // Activity-started refresh blocks overlapping periodic polls and enforces cooldown without enqueuing.
+        assert!(t.on_activity(pid, 600_000));
+        assert!(!t.try_start_periodic(pid, 601_000));
+        t.finish(pid);
+        assert!(!t.try_start_periodic(pid, 600_000 + 297_999));
+        assert!(t.take_due(1_000_000).is_empty());
     }
 }

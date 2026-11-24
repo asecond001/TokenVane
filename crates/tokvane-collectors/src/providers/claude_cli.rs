@@ -108,6 +108,38 @@ impl ClaudeAuthStatus {
     }
 }
 
+#[cfg(any(windows, test))]
+fn npm_native_claude_exe(dir: &Path) -> PathBuf {
+    dir.join("node_modules")
+        .join("@anthropic-ai")
+        .join("claude-code")
+        .join("bin")
+        .join("claude.exe")
+}
+
+#[cfg(any(windows, test))]
+fn resolve_windows_claude_candidates(
+    home: Option<&Path>,
+    path_dirs: &[PathBuf],
+    app_data: Option<&Path>,
+) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(home) = home {
+        candidates.push(home.join(".local").join("bin").join("claude.exe"));
+    }
+    for dir in path_dirs {
+        candidates.push(dir.join("claude.exe"));
+        candidates.push(npm_native_claude_exe(dir));
+        candidates.push(dir.join("claude.cmd"));
+    }
+    if let Some(app_data) = app_data {
+        let npm_dir = app_data.join("npm");
+        candidates.push(npm_native_claude_exe(&npm_dir));
+        candidates.push(npm_dir.join("claude.cmd"));
+    }
+    candidates
+}
+
 /// Locate the official Claude Code CLI executable (native installer or npm shim).
 pub fn resolve_claude_cli_binary() -> Option<PathBuf> {
     if let Some(override_bin) = std::env::var_os("TOKENVANE_CLAUDE_BIN") {
@@ -120,18 +152,16 @@ pub fn resolve_claude_cli_binary() -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     #[cfg(windows)]
     {
-        if let Some(home) = user_home_dir() {
-            candidates.push(home.join(".local").join("bin").join("claude.exe"));
-        }
-        if let Some(path_env) = std::env::var_os("PATH") {
-            for dir in std::env::split_paths(&path_env) {
-                candidates.push(dir.join("claude.exe"));
-                candidates.push(dir.join("claude.cmd"));
-            }
-        }
-        if let Some(app_data) = std::env::var_os("APPDATA") {
-            candidates.push(PathBuf::from(app_data).join("npm").join("claude.cmd"));
-        }
+        let home = user_home_dir();
+        let path_dirs: Vec<PathBuf> = std::env::var_os("PATH")
+            .map(|p| std::env::split_paths(&p).collect())
+            .unwrap_or_default();
+        let app_data = std::env::var_os("APPDATA").map(PathBuf::from);
+        candidates.extend(resolve_windows_claude_candidates(
+            home.as_deref(),
+            &path_dirs,
+            app_data.as_deref(),
+        ));
     }
 
     #[cfg(not(windows))]
@@ -802,5 +832,36 @@ mod tests {
 
         invalidate_claude_auth_cache();
         assert!(paused_claude_auth_error().is_none());
+    }
+
+    #[test]
+    fn windows_claude_resolution_prefers_native_npm_binary_over_cmd_shim() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let app_data = temp.path().join("appdata");
+        let npm_dir = app_data.join("npm");
+        let native_exe = npm_native_claude_exe(&npm_dir);
+        let cmd_shim = npm_dir.join("claude.cmd");
+        let home_exe = home.join(".local").join("bin").join("claude.exe");
+
+        std::fs::create_dir_all(&npm_dir).expect("mkdir npm");
+        std::fs::write(&cmd_shim, "@echo off\r\n").expect("write shim");
+
+        let pick = |path_dirs: &[PathBuf]| {
+            resolve_windows_claude_candidates(Some(&home), path_dirs, Some(&app_data))
+                .into_iter()
+                .find(|p| p.is_file())
+        };
+
+        assert_eq!(pick(std::slice::from_ref(&npm_dir)).as_ref(), Some(&cmd_shim));
+
+        std::fs::create_dir_all(native_exe.parent().expect("parent")).expect("mkdir native bin");
+        std::fs::write(&native_exe, b"MZ").expect("write native exe");
+        assert_eq!(pick(std::slice::from_ref(&npm_dir)).as_ref(), Some(&native_exe));
+        assert_eq!(pick(&[]).as_ref(), Some(&native_exe));
+
+        std::fs::create_dir_all(home_exe.parent().expect("parent")).expect("mkdir local bin");
+        std::fs::write(&home_exe, b"MZ").expect("write home exe");
+        assert_eq!(pick(std::slice::from_ref(&npm_dir)).as_ref(), Some(&home_exe));
     }
 }

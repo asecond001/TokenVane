@@ -5468,7 +5468,7 @@ dependencies = [
 
 [[package]]
 name = "tokvane-collectors"
-version = "0.4.12"
+version = "0.4.13"
 dependencies = [
  "axum",
  "chrono",
@@ -5490,7 +5490,7 @@ dependencies = [
 
 [[package]]
 name = "tokvane-core"
-version = "0.4.12"
+version = "0.4.13"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
@@ -5511,7 +5511,7 @@ dependencies = [
 
 [[package]]
 name = "tokvane-desktop"
-version = "0.4.12"
+version = "0.4.13"
 dependencies = [
  "chrono",
  "serde",
@@ -5534,7 +5534,7 @@ dependencies = [
 
 [[package]]
 name = "tokvane-ffi"
-version = "0.4.12"
+version = "0.4.13"
 dependencies = [
  "serde",
  "serde_json",

@@ -739,18 +739,27 @@ struct CliProcessOutput {
     stderr: String,
 }
 
-fn run_agy_cli_blocking(bin_path: &Path) -> CollectorResult<CliProcessOutput> {
-    let cwd = agy_probe_dir()?;
+fn build_agy_cli_command(bin_path: &Path, cwd: &Path) -> std::process::Command {
     // Rust std >= 1.77 executes `.cmd` / `.bat` wrappers via `cmd.exe` with safe quoting.
     let mut cmd = std::process::Command::new(bin_path);
     cmd.args(["-p", "/usage", "--output-format", "json"])
-        .current_dir(&cwd)
+        .current_dir(cwd)
+        // Strictly `"true"` (lowercase): `agy.exe`'s updater compares `os.Getenv("AGY_CLI_DISABLE_AUTO_UPDATE") == "true"`.
+        // Without this, `agy.exe` spawns `agy.exe --bg-updater` with `DETACHED_PROCESS` every 15 minutes,
+        // flashing a Windows Terminal (`OpenConsole.exe` / `WindowsTerminal.exe`) window.
+        .env("AGY_CLI_DISABLE_AUTO_UPDATE", "true")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
     crate::cli_process::apply_headless_no_browser_env(&mut cmd);
     crate::cli_process::configure_hidden_cli_command(&mut cmd);
+    cmd
+}
+
+fn run_agy_cli_blocking(bin_path: &Path) -> CollectorResult<CliProcessOutput> {
+    let cwd = agy_probe_dir()?;
+    let mut cmd = build_agy_cli_command(bin_path, &cwd);
 
     let mut child = cmd
         .spawn()
@@ -1675,5 +1684,35 @@ mod tests {
         reset_agy_probe_backoff();
         assert!(!agy_auth_paused());
         assert!(agy_backoff_remaining().is_none());
+    }
+
+    #[test]
+    fn agy_cli_command_disables_auto_updater_and_sets_headless_env() {
+        use std::ffi::OsStr;
+
+        let cmd = build_agy_cli_command(Path::new("agy.exe"), Path::new("probe-dir"));
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| OsStr::to_string_lossy(a).into_owned())
+            .collect();
+        assert_eq!(args, vec!["-p", "/usage", "--output-format", "json"]);
+        assert_eq!(cmd.get_current_dir(), Some(Path::new("probe-dir")));
+
+        let envs: Vec<(String, Option<String>)> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|val| OsStr::to_string_lossy(val).into_owned()),
+                )
+            })
+            .collect();
+
+        assert!(envs.contains(&("AGY_CLI_DISABLE_AUTO_UPDATE".to_string(), Some("true".to_string()))));
+        assert!(envs.contains(&("NO_BROWSER".to_string(), Some("true".to_string()))));
+        assert!(envs.contains(&("CI".to_string(), Some("true".to_string()))));
+        assert!(envs.contains(&("GIT_TERMINAL_PROMPT".to_string(), Some("0".to_string()))));
+        assert!(envs.contains(&("TERM".to_string(), Some("dumb".to_string()))));
+        assert!(envs.contains(&("BROWSER".to_string(), None)));
     }
 }
