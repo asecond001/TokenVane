@@ -136,9 +136,7 @@ describe('model comparison data', () => {
     expect(basisByModel).toEqual({ 'gpt-6-astra': 'decode', 'gemini-pro': 'end_to_end', legacy: null });
 
     const enough = MIN_FRONTIER_SPEED_SAMPLES;
-    expect(isFrontierEligible({ samples: enough, speed_basis: 'decode' })).toBe(true);
-    expect(isFrontierEligible({ samples: enough, speed_basis: null })).toBe(true);
-    expect(isFrontierEligible({ samples: enough, speed_basis: 'end_to_end' })).toBe(false);
-    expect(isFrontierEligible({ samples: enough - 1, speed_basis: 'decode' })).toBe(false);
+    expect(isFrontierEligible({ samples: enough })).toBe(true);
+    expect(isFrontierEligible({ samples: enough - 1 })).toBe(false);
   });
 });

@@ -930,6 +930,94 @@ fn kimi_auto_plan_without_level_keeps_zero_fee_and_toggle_keeps_it_auto() {
 }
 
 #[test]
+fn lapsed_kimi_plan_drops_stale_windows_and_shows_free_tier() {
+    let storage = Storage::open_in_memory().expect("db");
+    let now_ms = Utc::now().timestamp_millis();
+    storage
+        .upsert_observed_rate_limits(&[ObservedRateLimitWindow {
+            provider_id: provider_ids::KIMI_CODE.to_string(),
+            window_name: "30d".to_string(),
+            used_percent: 79.0,
+            window_minutes: Some(43_200),
+            resets_at_ms: Some(now_ms - 1_000),
+            observed_at_ms: now_ms - 10_000,
+            source: Some("official_api".to_string()),
+            plan_hint: None,
+        }])
+        .expect("paid window");
+
+    // The plan lapsed: the profile reports Free and the usages endpoint returns no windows.
+    storage
+        .upsert_observed_rate_limits(&[crate::pricing::kimi_profile_tier_hint(
+            provider_ids::KIMI_CODE,
+            "Free",
+            now_ms,
+        )])
+        .expect("free level");
+    storage
+        .replace_provider_source_rate_limits(provider_ids::KIMI_CODE, "official_api", &[])
+        .expect("empty usages");
+
+    let subs = storage.query_subscriptions(now_ms).expect("subs");
+    assert_eq!(subs.len(), 1);
+    assert_eq!(subs[0].plan.plan_name, "Kimi Code Free");
+    assert_eq!(subs[0].plan.monthly_fee_micro_usd, 0);
+    assert!(subs[0].windows.is_empty());
+    assert!(storage
+        .list_observed_rate_limits()
+        .expect("observed")
+        .is_empty());
+}
+
+#[test]
+fn removing_an_observed_only_provider_hides_its_windows() {
+    let storage = Storage::open_in_memory().expect("db");
+    let now_ms = Utc::now().timestamp_millis();
+    storage
+        .upsert_observed_rate_limits(&[ObservedRateLimitWindow {
+            provider_id: "minimax_code".to_string(),
+            window_name: "5h".to_string(),
+            used_percent: 20.0,
+            window_minutes: Some(300),
+            resets_at_ms: Some(now_ms + 3_600_000),
+            observed_at_ms: now_ms,
+            source: Some("official_api".to_string()),
+            plan_hint: None,
+        }])
+        .expect("observe");
+    storage
+        .delete_subscription_plan("auto_minimax_code")
+        .expect("remove provider row");
+    assert!(storage
+        .list_observed_rate_limits()
+        .expect("observed")
+        .iter()
+        .all(|o| o.provider_id != "minimax_code"));
+    // New observations do not bring the removed row back.
+    storage
+        .upsert_observed_rate_limits(&[ObservedRateLimitWindow {
+            provider_id: "minimax_code".to_string(),
+            window_name: "5h".to_string(),
+            used_percent: 30.0,
+            window_minutes: Some(300),
+            resets_at_ms: Some(now_ms + 3_600_000),
+            observed_at_ms: now_ms + 1_000,
+            source: Some("official_api".to_string()),
+            plan_hint: None,
+        }])
+        .expect("observe again");
+    assert!(storage
+        .query_subscriptions(now_ms + 1_000)
+        .expect("subs")
+        .iter()
+        .all(|s| s.plan.provider_id != "minimax_code" || !s.plan.is_user_configured));
+    assert!(storage
+        .list_observed_rate_limits()
+        .expect("observed")
+        .is_empty());
+}
+
+#[test]
 fn kimi_profile_level_overrides_manual_tier_and_detects_free_accounts() {
     let storage = Storage::open_in_memory().expect("db");
     let now_ms = Utc::now().timestamp_millis();

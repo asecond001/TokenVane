@@ -204,6 +204,9 @@ export function resolveSubscriptionTierLabel(
   if (plan.monthly_fee_micro_usd > 0) {
     return `月费 ${formatCost(plan.monthly_fee_micro_usd, currency, usdToCnyRateStr)}`;
   }
+  if (/\bfree\b/i.test(plan.plan_name)) {
+    return '免费档位';
+  }
   if (plan.auto_source === 'official_api') {
     return '官方同步档位';
   }

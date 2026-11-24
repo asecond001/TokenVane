@@ -265,21 +265,21 @@ function ComparisonView() {
             ? `API 实付 ${symbol}${p.price.toFixed(3)} / M`
             : `${basisLabel} ${symbol}${p.price.toFixed(3)} / M`;
           let status = '';
-          if (p.speed_basis === 'end_to_end') {
-            status = '端到端口径 · 含首字延迟，单独展示';
-          } else if (p.samples < MIN_FRONTIER_SPEED_SAMPLES) {
+          if (p.samples < MIN_FRONTIER_SPEED_SAMPLES) {
             status = `速度样本积累中（${p.samples}/${MIN_FRONTIER_SPEED_SAMPLES}）`;
           } else if (frontierSet.has(p.key)) {
-            status = '性价比前沿';
+            status = '帕累托前沿 · 同价位最快';
           } else {
             const by = byKey.get(dominatedBy.get(p.key) ?? '');
-            if (by) status = `被 ${by.model_id} 全面超越`;
+            if (by) status = `${by.model_id} 更快且更便宜`;
           }
+          const basisNote = p.speed_basis === 'end_to_end' ? '端到端口径 · 含首字延迟' : '';
           return [
             `<b>${p.model_id}</b> · ${providerDisplayName(p.provider_id)}`,
             priceLine,
             `平均速率 ${p.tps.toFixed(1)} tok/s · ${p.samples} 样本`,
             `Token ${formatTokens(p.tokens)}`,
+            basisNote,
             status,
           ]
             .filter(Boolean)
@@ -300,7 +300,14 @@ function ComparisonView() {
           right: 24,
           top: 34,
           silent: true,
-          style: { text: '更便宜 · 更快 ↗', fill: chartTheme.textMuted, fontSize: 11 },
+          style: { text: '快且便宜 ↗', fill: chartTheme.textMuted, fontSize: 11 },
+        },
+        {
+          type: 'text',
+          left: 64,
+          bottom: 42,
+          silent: true,
+          style: { text: '↙ 慢且贵', fill: chartTheme.textMuted, fontSize: 11 },
         },
       ],
       grid: { top: 30, right: 20, bottom: 34, left: 56 },
@@ -326,7 +333,7 @@ function ComparisonView() {
       series: [
         {
           id: 'pareto-frontier',
-          name: '性价比前沿',
+          name: '帕累托前沿',
           type: 'line' as const,
           silent: true,
           symbol: 'none',
@@ -490,11 +497,11 @@ function ComparisonView() {
         </div>
       </section>
 
-      {/* Price vs speed Pareto frontier */}
+      {/* Speed vs price Pareto frontier */}
       {scatterPoints.length > 0 && (
         <section className="pb-5" style={{ borderBottom: '1px solid var(--border-hairline)' }} data-testid="models-value-scatter">
           <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-            <h2 className="text-[13.5px] font-semibold">性价比前沿</h2>
+            <h2 className="text-[13.5px] font-semibold">速度与价格</h2>
             <div
               className="seg-group"
               role="radiogroup"

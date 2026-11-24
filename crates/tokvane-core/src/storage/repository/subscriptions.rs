@@ -6,10 +6,22 @@ use crate::pricing::KIMI_PROFILE_HINT_SOURCE;
 impl Storage {
     pub fn list_observed_rate_limits(&self) -> CoreResult<Vec<ObservedRateLimitWindow>> {
         self.with_conn(|conn| {
+            // Windows of a provider whose auto-discovered plan the user removed stay hidden, so a
+            // removed row never comes back as a separate observed-window row.
+            let mut stmt = conn.prepare(
+                "SELECT provider_id FROM subscription_plans WHERE plan_id LIKE 'auto_%' AND user_dismissed = 1",
+            )?;
+            let dismissed: BTreeSet<String> = stmt
+                .query_map([], |row| {
+                    row.get::<_, String>(0).map(|p| p.to_ascii_lowercase())
+                })?
+                .collect::<Result<_, _>>()?;
             Ok(load_observed_rate_limits(conn)?
                 .into_iter()
                 .filter(|o| {
-                    o.source.as_deref() != Some("local_log_hint") && o.window_name != "tier_hint"
+                    o.source.as_deref() != Some("local_log_hint")
+                        && o.window_name != "tier_hint"
+                        && !dismissed.contains(&o.provider_id.to_ascii_lowercase())
                 })
                 .collect())
         })
@@ -211,6 +223,21 @@ impl Storage {
                 )
                 .optional()?;
 
+            if auto_source.is_none() {
+                // Removing an auto-discovered provider that has observed windows but no plan row
+                // yet: record the dismissal so its windows stay hidden like any removed plan.
+                if let Some(provider_id) = trimmed.strip_prefix("auto_").filter(|p| !p.is_empty()) {
+                    conn.execute(
+                        r#"
+                        INSERT INTO subscription_plans
+                            (plan_id, provider_id, plan_name, enabled, monthly_fee_micro_usd, windows_json, is_user_configured, auto_source, user_customized, user_dismissed, updated_at_ms)
+                        VALUES (?1, ?2, ?2, 0, 0, '[]', 0, NULL, 0, 1, ?3)
+                        "#,
+                        params![trimmed, provider_id, now_ms],
+                    )?;
+                }
+                return Ok(());
+            }
             if auto_source.flatten().is_some() || trimmed.starts_with("auto_") {
                 conn.execute(
                     r#"
@@ -1061,7 +1088,9 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
             .then_with(|| a.duration_hours.cmp(&b.duration_hours))
             .then_with(|| a.window_id.cmp(&b.window_id))
     });
-    if windows.is_empty() && trimmed != provider_ids::ANTIGRAVITY {
+    // A known official Kimi level (e.g. a free account whose coding plan lapsed) still defines
+    // the plan even when the usages endpoint returns no quota windows.
+    if windows.is_empty() && trimmed != provider_ids::ANTIGRAVITY && !official_level_known {
         return Ok(());
     }
 

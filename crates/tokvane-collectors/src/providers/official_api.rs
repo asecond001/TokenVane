@@ -544,7 +544,15 @@ pub async fn refresh_provider_balance_with_fetcher_inner(
 
     storage.upsert_provider_balance(&snapshot)?;
     let rate_limits_updated = rate_limits.len();
-    if !rate_limits.is_empty() {
+    if provider_id == provider_ids::KIMI_CODE && selected_endpoint == endpoints.kimi_coding_url {
+        // The usages response is the canonical window list: when the coding plan lapses it
+        // returns no windows, and the windows of the expired plan must not linger.
+        storage.replace_provider_source_rate_limits(
+            provider_ids::KIMI_CODE,
+            "official_api",
+            &rate_limits,
+        )?;
+    } else if !rate_limits.is_empty() {
         storage.upsert_observed_rate_limits(&rate_limits)?;
     }
 

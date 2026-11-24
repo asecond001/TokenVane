@@ -27,6 +27,9 @@ import type {
 } from '../types/ipc';
 import { CLOCK_REFRESH_MS } from '../lib/liveRefresh';
 
+const CURRENT_TIER_VALUE = '__current';
+const CUSTOM_TIER_VALUE = '__custom';
+
 const API_PROVIDERS: Array<{ id: string; label: string }> = [
   { id: 'deepseek_harness', label: 'DeepSeek Harness' },
   { id: 'kimi_code', label: 'Kimi Code' },
@@ -259,6 +262,9 @@ export function SubscriptionsPage() {
   const { currency, usdToCnyRate, tzOffsetMinutes } = useWorkspaceStore();
 
   const [confirmDeleteQuotaId, setConfirmDeleteQuotaId] = useState<string | null>(null);
+  const [customFeeDraft, setCustomFeeDraft] = useState<{ planId: string; value: string } | null>(
+    null
+  );
   const [accountDraft, setAccountDraft] = useState<AccountFormDraft | null>(null);
   const [accountFormError, setAccountFormError] = useState<string | null>(null);
   const [confirmDeletePaygId, setConfirmDeletePaygId] = useState<string | null>(null);
@@ -379,18 +385,12 @@ export function SubscriptionsPage() {
     return Array.from(grouped.values());
   }, [remoteSnapshots]);
 
-  const quotaAccounts = useMemo(
-    () => plans.filter((s) => s.plan.is_user_configured && s.windows.length > 0),
-    [plans]
-  );
+  const quotaAccounts = useMemo(() => plans.filter((s) => s.plan.is_user_configured), [plans]);
 
-  const enabledQuotaProviders = useMemo(
-    () =>
-      new Set(
-        quotaAccounts
-          .filter((s) => s.plan.enabled)
-          .map((s) => s.plan.provider_id.toLowerCase())
-      ),
+  // Providers already represented by a plan row (enabled or paused): their observed windows
+  // belong to that row and never show up again as a separate row.
+  const boundQuotaProviders = useMemo(
+    () => new Set(quotaAccounts.map((s) => s.plan.provider_id.toLowerCase())),
     [quotaAccounts]
   );
 
@@ -400,7 +400,7 @@ export function SubscriptionsPage() {
       if (obs.source === 'local_log_hint' || obs.window_name === 'tier_hint') {
         continue;
       }
-      if (enabledQuotaProviders.has(obs.provider_id.toLowerCase())) {
+      if (boundQuotaProviders.has(obs.provider_id.toLowerCase())) {
         continue;
       }
       const list = grouped.get(obs.provider_id) ?? [];
@@ -413,7 +413,7 @@ export function SubscriptionsPage() {
         (a, b) => observedWindowSortKey(a) - observedWindowSortKey(b)
       ),
     }));
-  }, [observedRateLimits, enabledQuotaProviders]);
+  }, [observedRateLimits, boundQuotaProviders]);
 
   const invalidateUsageQueries = async () => {
     await queryClient.invalidateQueries({ queryKey: ['subscriptions'] });
@@ -447,6 +447,34 @@ export function SubscriptionsPage() {
       await invalidateUsageQueries();
     },
   });
+
+  const applyCustomFeeMutation = useMutation({
+    mutationFn: ({ status, feeMicroUsd }: { status: SubscriptionPlanStatus; feeMicroUsd: number }) =>
+      ipc.upsertSubscriptionPlan({
+        ...status.plan,
+        monthly_fee_micro_usd: feeMicroUsd,
+        is_user_configured: true,
+      }),
+    onSuccess: async () => {
+      setCustomFeeDraft(null);
+      await invalidateUsageQueries();
+    },
+  });
+
+  const commitCustomFee = (status: SubscriptionPlanStatus) => {
+    if (!customFeeDraft || customFeeDraft.planId !== status.plan.plan_id) return;
+    const usd = Number.parseFloat(customFeeDraft.value);
+    if (!Number.isFinite(usd) || usd < 0) {
+      setCustomFeeDraft(null);
+      return;
+    }
+    const feeMicroUsd = Math.round(usd * 1_000_000);
+    if (feeMicroUsd === status.plan.monthly_fee_micro_usd) {
+      setCustomFeeDraft(null);
+      return;
+    }
+    applyCustomFeeMutation.mutate({ status, feeMicroUsd });
+  };
 
   const deleteQuotaMutation = useMutation({
     mutationFn: (planId: string) => ipc.deleteSubscriptionPlan(planId),
@@ -707,6 +735,71 @@ export function SubscriptionsPage() {
     });
   };
 
+  const renderQuotaRowActions = (row: { planId: string; providerId: string; name: string }) => (
+    <div className="flex items-center gap-1.5 shrink-0">
+      {confirmDeleteQuotaId === row.planId ? (
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            disabled={deleteQuotaMutation.isPending}
+            onClick={() => deleteQuotaMutation.mutate(row.planId)}
+            className="btn-danger inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium cursor-pointer disabled:opacity-50"
+            style={{
+              backgroundColor: 'var(--accent-rose)',
+              color: '#ffffff',
+            }}
+          >
+            <Check className="w-3 h-3" />
+            <span>确认</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setConfirmDeleteQuotaId(null)}
+            className="btn-interactive bg-[var(--bg-elevated)] px-2 py-1 rounded-lg text-[11px] cursor-pointer"
+            style={{
+              border: '1px solid var(--border-subtle)',
+              color: 'var(--text-secondary)',
+            }}
+          >
+            取消
+          </button>
+        </div>
+      ) : (
+        <>
+          <button
+            type="button"
+            disabled={refreshQuotaMutation.isPending}
+            onClick={() => refreshQuotaMutation.mutate(row.providerId)}
+            className="btn-interactive bg-[var(--bg-elevated)] p-1.5 rounded-lg cursor-pointer disabled:opacity-50"
+            style={{
+              border: '1px solid var(--border-subtle)',
+              color: 'var(--text-secondary)',
+            }}
+            title={`刷新 ${row.name}`}
+            aria-label={`刷新 ${row.name}`}
+          >
+            <RefreshCw
+              className={`w-3.5 h-3.5 ${refreshQuotaMutation.isPending ? 'animate-spin' : ''}`}
+            />
+          </button>
+          <button
+            type="button"
+            onClick={() => setConfirmDeleteQuotaId(row.planId)}
+            className="btn-danger bg-[var(--bg-elevated)] p-1.5 rounded-lg cursor-pointer"
+            style={{
+              border: '1px solid var(--border-subtle)',
+              color: 'var(--accent-rose)',
+            }}
+            title="移除该配额项"
+            aria-label={`删除 ${row.name}`}
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+          </button>
+        </>
+      )}
+    </div>
+  );
+
   const hasCredentialForProvider = (providerId: string): boolean =>
     providerConfigs.some((cfg) => cfg.provider_id === providerId && cfg.has_credential);
 
@@ -810,8 +903,7 @@ export function SubscriptionsPage() {
               <div style={{ borderTop: '1px solid var(--border-subtle)' }}>
                 {quotaAccounts.map((status) => {
                   const { plan, windows } = status;
-                  const confirmingDelete = confirmDeleteQuotaId === plan.plan_id;
-                  const autoBadge = autoSourceBadge(plan.auto_source);
+                                    const autoBadge = autoSourceBadge(plan.auto_source);
                   const tierOptions = templatesByProvider.get(plan.provider_id.toLowerCase()) ?? [];
                   const selectedTier = tierOptions.find(
                     (tpl) =>
@@ -864,12 +956,23 @@ export function SubscriptionsPage() {
                           <span>
                             {resolveSubscriptionTierLabel(plan, currency, usdToCnyRate, true)}
                           </span>
-                          {tierOptions.length > 0 && (
-                            <select
+                          <select
                               aria-label={`${plan.plan_name} 订阅档位`}
-                              value={selectedTier?.template_id ?? ''}
-                              disabled={applyTierMutation.isPending}
+                              value={
+                                customFeeDraft?.planId === plan.plan_id
+                                  ? CUSTOM_TIER_VALUE
+                                  : (selectedTier?.template_id ?? CURRENT_TIER_VALUE)
+                              }
+                              disabled={applyTierMutation.isPending || applyCustomFeeMutation.isPending}
                               onChange={(e) => {
+                                if (e.target.value === CUSTOM_TIER_VALUE) {
+                                  setCustomFeeDraft({
+                                    planId: plan.plan_id,
+                                    value: String(plan.monthly_fee_micro_usd / 1_000_000),
+                                  });
+                                  return;
+                                }
+                                setCustomFeeDraft(null);
                                 const tpl = tierOptions.find(
                                   (t) => t.template_id === e.target.value
                                 );
@@ -885,8 +988,10 @@ export function SubscriptionsPage() {
                               }}
                             >
                               {!selectedTier && (
-                                <option value="" disabled>
-                                  选择档位
+                                <option value={CURRENT_TIER_VALUE} disabled>
+                                  {plan.monthly_fee_micro_usd > 0
+                                    ? `${plan.plan_name} · ${formatCost(plan.monthly_fee_micro_usd, currency, usdToCnyRate)}`
+                                    : plan.plan_name}
                                 </option>
                               )}
                               {tierOptions.map((tpl) => (
@@ -896,7 +1001,34 @@ export function SubscriptionsPage() {
                                     : tpl.plan_name}
                                 </option>
                               ))}
+                              <option value={CUSTOM_TIER_VALUE}>自定义月费…</option>
                             </select>
+                          {customFeeDraft?.planId === plan.plan_id && (
+                            <label className="inline-flex items-center gap-1">
+                              <span>USD</span>
+                              <input
+                                type="number"
+                                min={0}
+                                step={0.01}
+                                autoFocus
+                                aria-label={`${plan.plan_name} 月费 USD`}
+                                value={customFeeDraft.value}
+                                onChange={(e) =>
+                                  setCustomFeeDraft({ planId: plan.plan_id, value: e.target.value })
+                                }
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') commitCustomFee(status);
+                                  if (e.key === 'Escape') setCustomFeeDraft(null);
+                                }}
+                                onBlur={() => commitCustomFee(status)}
+                                className="w-20 px-1.5 py-0.5 text-[11px] rounded-lg outline-none tabular-nums"
+                                style={{
+                                  backgroundColor: 'var(--bg-input)',
+                                  border: '1px solid var(--border-subtle)',
+                                  color: 'var(--text-primary)',
+                                }}
+                              />
+                            </label>
                           )}
                           <button
                             type="button"
@@ -1001,68 +1133,11 @@ export function SubscriptionsPage() {
                           ))}
                         </div>
 
-                        <div className="flex items-center gap-1.5 shrink-0">
-                          {confirmingDelete ? (
-                            <div className="flex items-center gap-1">
-                              <button
-                                type="button"
-                                disabled={deleteQuotaMutation.isPending}
-                                onClick={() => deleteQuotaMutation.mutate(plan.plan_id)}
-                                className="btn-danger inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium cursor-pointer disabled:opacity-50"
-                                style={{
-                                  backgroundColor: 'var(--accent-rose)',
-                                  color: '#ffffff',
-                                }}
-                              >
-                                <Check className="w-3 h-3" />
-                                <span>确认</span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => setConfirmDeleteQuotaId(null)}
-                                className="btn-interactive bg-[var(--bg-elevated)] px-2 py-1 rounded-lg text-[11px] cursor-pointer"
-                                style={{
-                                  border: '1px solid var(--border-subtle)',
-                                  color: 'var(--text-secondary)',
-                                }}
-                              >
-                                取消
-                              </button>
-                            </div>
-                          ) : (
-                            <>
-                              <button
-                                type="button"
-                                disabled={refreshQuotaMutation.isPending}
-                                onClick={() => refreshQuotaMutation.mutate(plan.provider_id)}
-                                className="btn-interactive bg-[var(--bg-elevated)] p-1.5 rounded-lg cursor-pointer disabled:opacity-50"
-                                style={{
-                                  border: '1px solid var(--border-subtle)',
-                                  color: 'var(--text-secondary)',
-                                }}
-                                title={`刷新 ${plan.plan_name}`}
-                                aria-label={`刷新 ${plan.plan_name}`}
-                              >
-                                <RefreshCw
-                                  className={`w-3.5 h-3.5 ${refreshQuotaMutation.isPending ? 'animate-spin' : ''}`}
-                                />
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => setConfirmDeleteQuotaId(plan.plan_id)}
-                                className="btn-danger bg-[var(--bg-elevated)] p-1.5 rounded-lg cursor-pointer"
-                                style={{
-                                  border: '1px solid var(--border-subtle)',
-                                  color: 'var(--accent-rose)',
-                                }}
-                                title="移除该配额项"
-                                aria-label={`删除 ${plan.plan_name}`}
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            </>
-                          )}
-                        </div>
+                        {renderQuotaRowActions({
+                          planId: plan.plan_id,
+                          providerId: plan.provider_id,
+                          name: plan.plan_name,
+                        })}
                       </div>
                     </div>
                   );
@@ -1118,7 +1193,8 @@ export function SubscriptionsPage() {
                       })}
                     </div>
 
-                    <div className="col-span-12 lg:col-span-3 space-y-1 text-[11.5px] tabular-nums">
+                    <div className="col-span-12 lg:col-span-3 flex items-center justify-between gap-3">
+                    <div className="space-y-1 text-[11.5px] tabular-nums">
                       {group.windows.map((obs) => {
                         const resetSecs =
                           obs.resets_at_ms !== null
@@ -1147,6 +1223,12 @@ export function SubscriptionsPage() {
                           </div>
                         );
                       })}
+                    </div>
+                    {renderQuotaRowActions({
+                      planId: `auto_${group.provider_id}`,
+                      providerId: group.provider_id,
+                      name: providerDisplayName(group.provider_id),
+                    })}
                     </div>
                   </div>
                 ))}

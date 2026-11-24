@@ -317,7 +317,8 @@ describe('v0.2.2 Floating Monitor, Session Titles & Subscription Tier Labels', (
 
     renderWithQuery(<SubscriptionsPage />);
 
-    expect(await screen.findByText('Kimi Code Vivace')).toBeInTheDocument();
+    // The name shows as the row title and as the current entry of the tier picker.
+    expect((await screen.findAllByText('Kimi Code Vivace')).length).toBeGreaterThan(0);
     expect(screen.getByText('官方同步档位')).toBeInTheDocument();
     expect(screen.getByText('官方配额窗口监测')).toBeInTheDocument();
     expect(screen.queryByText(/未设月费/)).not.toBeInTheDocument();

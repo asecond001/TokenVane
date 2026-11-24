@@ -238,14 +238,11 @@ export const PRICE_BASIS_OPTIONS: Array<{ id: PriceBasis; label: string }> = [
 export const MIN_FRONTIER_SPEED_SAMPLES = 20;
 
 /**
- * Whether a point's speed can be ranked against the others: enough samples and a
- * decode-window caliber. End-to-end speeds include TTFT and would always look slower.
+ * Whether a point's speed is settled enough to take part in the frontier. Every speed
+ * caliber counts, end-to-end included: it is the speed the user actually experiences.
  */
-export function isFrontierEligible(point: {
-  samples: number;
-  speed_basis: SpeedBasis | null;
-}): boolean {
-  return point.samples >= MIN_FRONTIER_SPEED_SAMPLES && point.speed_basis !== 'end_to_end';
+export function isFrontierEligible(point: { samples: number }): boolean {
+  return point.samples >= MIN_FRONTIER_SPEED_SAMPLES;
 }
 
 export interface BasisPrice {

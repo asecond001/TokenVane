@@ -362,7 +362,7 @@ describe('Bug fixes verification: Overview today shares, Kimi QUOTA display & Li
     renderWithQuery(<SubscriptionsPage />);
 
     const picker = (await screen.findByLabelText('Kimi Code 会员订阅 订阅档位')) as HTMLSelectElement;
-    expect(picker.value).toBe('');
+    expect(picker.value).toBe('__current');
     fireEvent.change(picker, { target: { value: 'kimi_code_allegretto' } });
 
     await waitFor(() => {
@@ -381,6 +381,47 @@ describe('Bug fixes verification: Overview today shares, Kimi QUOTA display & Li
       expect(enableSpy).toHaveBeenCalledWith('auto_kimi_code', false);
     });
     expect(upsertSpy).toHaveBeenCalledTimes(1);
+
+    // Any plan can also take a custom monthly fee.
+    fireEvent.change(picker, { target: { value: '__custom' } });
+    const feeInput = screen.getByLabelText('Kimi Code 会员订阅 月费 USD');
+    fireEvent.change(feeInput, { target: { value: '12.5' } });
+    fireEvent.keyDown(feeInput, { key: 'Enter' });
+    await waitFor(() => {
+      expect(upsertSpy).toHaveBeenLastCalledWith(
+        expect.objectContaining({ plan_id: 'auto_kimi_code', monthly_fee_micro_usd: 12_500_000 })
+      );
+    });
+  });
+
+  it('gives observed-only providers the same refresh and remove actions', async () => {
+    const now = Date.now();
+    vi.spyOn(ipc, 'getSubscriptions').mockResolvedValue([]);
+    vi.spyOn(ipc, 'getObservedRateLimits').mockResolvedValue([
+      {
+        provider_id: 'minimax_code',
+        window_name: '5h',
+        used_percent: 20,
+        window_minutes: 300,
+        resets_at_ms: now + 3_600_000,
+        observed_at_ms: now,
+        source: 'official_api',
+        plan_hint: null,
+      },
+    ]);
+    vi.spyOn(ipc, 'getSubscriptionTemplates').mockResolvedValue([]);
+    vi.spyOn(ipc, 'getRemoteSubscriptionSnapshots').mockResolvedValue([]);
+    vi.spyOn(ipc, 'getPaygAccounts').mockResolvedValue([]);
+    vi.spyOn(ipc, 'getProviderConfigs').mockResolvedValue([]);
+    const deleteSpy = vi.spyOn(ipc, 'deleteSubscriptionPlan').mockResolvedValue(undefined);
+
+    renderWithQuery(<SubscriptionsPage />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '删除 MiniMax Code' }));
+    fireEvent.click(screen.getByRole('button', { name: '确认' }));
+    await waitFor(() => {
+      expect(deleteSpy).toHaveBeenCalledWith('auto_minimax_code');
+    });
   });
 
   it('renders Kimi Code QUOTA snapshot cleanly in DataSourcesPage', async () => {
@@ -582,7 +623,7 @@ describe('v0.2.7 Unified 用量 Account Hub & Positive UI Copy', () => {
     vi.restoreAllMocks();
   });
 
-  it('omits windowless manual plans and exposes single 添加账户 entry point with login/API modes', async () => {
+  it('lists windowless manual plans with the same actions and a single 添加账户 entry point', async () => {
     const now = Date.now();
     const windowlessPlan: SubscriptionPlanStatus = {
       plan: {
@@ -611,11 +652,11 @@ describe('v0.2.7 Unified 用量 Account Hub & Positive UI Copy', () => {
 
     renderWithQuery(<SubscriptionsPage />);
 
-    expect(
-      await screen.findByText('添加账户以同步配额与余额')
-    ).toBeInTheDocument();
-    // Windowless manual plan must not be displayed
-    expect(screen.queryByText('Cursor Pro (Manual)')).not.toBeInTheDocument();
+    // A plan without quota windows is still a row the user can price, pause or remove.
+    expect(await screen.findByText('Cursor Pro (Manual)')).toBeInTheDocument();
+    expect(screen.getByLabelText('Cursor Pro (Manual) 订阅档位')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '删除 Cursor Pro (Manual)' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '刷新 Cursor Pro (Manual)' })).toBeInTheDocument();
     expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
     expect(screen.getAllByRole('button', { name: '添加账户' })).toHaveLength(1);
 
