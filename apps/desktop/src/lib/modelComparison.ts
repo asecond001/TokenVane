@@ -225,7 +225,7 @@ export function sortComparisonRows<T extends Record<ComparisonSortKey, number | 
   });
 }
 
-/** Price basis for the price × speed chart. */
+/** Price basis for the per-1M-token column of the model comparison table. */
 export type PriceBasis = 'list' | 'actual' | 'subscription';
 
 export const PRICE_BASIS_OPTIONS: Array<{ id: PriceBasis; label: string }> = [
@@ -233,17 +233,6 @@ export const PRICE_BASIS_OPTIONS: Array<{ id: PriceBasis; label: string }> = [
   { id: 'actual', label: 'API 实付' },
   { id: 'subscription', label: '订阅摊销' },
 ];
-
-/** Minimum speed samples before a model takes part in the frontier. */
-export const MIN_FRONTIER_SPEED_SAMPLES = 20;
-
-/**
- * Whether a point's speed is settled enough to take part in the frontier. Every speed
- * caliber counts, end-to-end included: it is the speed the user actually experiences.
- */
-export function isFrontierEligible(point: { samples: number }): boolean {
-  return point.samples >= MIN_FRONTIER_SPEED_SAMPLES;
-}
 
 export interface BasisPrice {
   /** Cost per 1M tokens in micro-USD under the requested basis. */
@@ -267,45 +256,4 @@ export function priceForBasis(row: ModelComparisonRow, basis: PriceBasis): Basis
   }
   if (!(cost > 0)) return null;
   return { per_m_micro_usd: (cost / row.total_tokens) * 1_000_000, basis: used };
-}
-
-export interface FrontierPoint {
-  key: string;
-  price: number;
-  tps: number;
-}
-
-export interface FrontierResult {
-  /** Keys on the Pareto frontier, cheapest first. */
-  frontier: string[];
-  /** Dominated key → the frontier key that beats it on both price and speed. */
-  dominatedBy: Map<string, string>;
-}
-
-/**
- * Pareto frontier for "cheaper is better, faster is better": a point is
- * dominated when another is no more expensive and no slower, and strictly
- * better on at least one axis.
- */
-export function computeParetoFrontier(points: FrontierPoint[]): FrontierResult {
-  const sorted = [...points].sort((a, b) => a.price - b.price || b.tps - a.tps);
-  const frontier: FrontierPoint[] = [];
-  let bestTps = -Infinity;
-  for (const p of sorted) {
-    const last = frontier[frontier.length - 1];
-    const tiesLast = last !== undefined && last.price === p.price && last.tps === p.tps;
-    if (p.tps > bestTps || tiesLast) {
-      frontier.push(p);
-      bestTps = p.tps;
-    }
-  }
-  const frontierKeys = new Set(frontier.map((p) => p.key));
-  const dominatedBy = new Map<string, string>();
-  for (const p of points) {
-    if (frontierKeys.has(p.key)) continue;
-    // Cheapest frontier point that is at least as cheap and at least as fast.
-    const by = frontier.find((f) => f.price <= p.price && f.tps >= p.tps);
-    if (by) dominatedBy.set(p.key, by.key);
-  }
-  return { frontier: frontier.map((p) => p.key), dominatedBy };
 }

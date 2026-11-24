@@ -2,9 +2,6 @@ import { describe, expect, it } from 'vitest';
 import {
   buildModelComparison,
   buildProviderComparison,
-  computeParetoFrontier,
-  isFrontierEligible,
-  MIN_FRONTIER_SPEED_SAMPLES,
   priceForBasis,
   type ModelComparisonRow,
 } from '../lib/modelComparison';
@@ -95,20 +92,7 @@ describe('model comparison data', () => {
     expect(priceForBasis(empty, 'actual')).toBeNull();
   });
 
-  it('keeps only non-dominated models on the Pareto frontier', () => {
-    const { frontier, dominatedBy } = computeParetoFrontier([
-      { key: 'cheap-slow', price: 0.2, tps: 20 },
-      { key: 'mid', price: 0.5, tps: 80 },
-      { key: 'pricey-fast', price: 1.2, tps: 150 },
-      { key: 'dominated', price: 0.8, tps: 60 },
-      { key: 'twin', price: 0.5, tps: 80 },
-    ]);
-    expect(frontier).toEqual(['cheap-slow', 'mid', 'twin', 'pricey-fast']);
-    expect(dominatedBy.get('dominated')).toBe('mid');
-    expect(dominatedBy.size).toBe(1);
-  });
-
-  it('carries the speed caliber and keeps end-to-end speeds off the frontier', () => {
+  it('carries the speed caliber of each model', () => {
     const speedRow = (overrides: Partial<ModelSpeedStats>): ModelSpeedStats => ({
       model_id: 'gpt-6-astra',
       provider_id: 'codex',
@@ -134,9 +118,5 @@ describe('model comparison data', () => {
     const rows = buildModelComparison(report([]), speed);
     const basisByModel = Object.fromEntries(rows.map((r) => [r.model_id, r.speed_basis]));
     expect(basisByModel).toEqual({ 'gpt-6-astra': 'decode', 'gemini-pro': 'end_to_end', legacy: null });
-
-    const enough = MIN_FRONTIER_SPEED_SAMPLES;
-    expect(isFrontierEligible({ samples: enough })).toBe(true);
-    expect(isFrontierEligible({ samples: enough - 1 })).toBe(false);
   });
 });

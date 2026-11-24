@@ -219,9 +219,13 @@ describe('v0.4.6 desktop fixes & features', () => {
     const providerTable = await screen.findByTestId('provider-compare-table');
     expect(within(providerTable).getByText('Claude Code')).toBeInTheDocument();
     expect(within(providerTable).getByText('108.4 tok/s')).toBeInTheDocument();
-    expect(screen.getByTestId('models-value-scatter')).toBeInTheDocument();
+    expect(screen.queryByTestId('models-value-scatter')).not.toBeInTheDocument();
 
     const modelTable = screen.getByTestId('model-compare-table');
+    // The per-1M column follows the selected price basis.
+    expect(screen.getByRole('radio', { name: 'API 实付' })).toHaveAttribute('aria-checked', 'true');
+    fireEvent.click(screen.getByRole('radio', { name: 'API 标价' }));
+    expect(screen.getByRole('radio', { name: 'API 标价' })).toHaveAttribute('aria-checked', 'true');
     fireEvent.click(within(modelTable).getByRole('columnheader', { name: /平均速率/ }));
     const firstModel = within(modelTable).getAllByRole('row')[1];
     expect(within(firstModel).getByText('gpt-5.3-codex')).toBeInTheDocument();

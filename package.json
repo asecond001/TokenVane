@@ -1,6 +1,6 @@
 {
   "name": "tokenvane-workspace",
-  "version": "0.4.14",
+  "version": "0.4.15",
   "private": true,
   "scripts": {
     "typecheck": "pnpm -r typecheck",
