@@ -140,7 +140,7 @@ export function LiveSpeedBadge({
         <div
           role="tooltip"
           data-testid="live-speed-tooltip"
-          className={`z-50 min-w-[205px] max-w-[270px] px-2.5 py-2 rounded-lg text-left text-[11px] space-y-1.5 pointer-events-none select-none ${
+          className={`z-50 w-max min-w-[205px] max-w-[min(440px,calc(100vw-24px))] px-2.5 py-2 rounded-lg text-left text-[11px] space-y-1.5 pointer-events-none select-none ${
             placement === 'top' ? 'bottom-full mb-1.5' : 'top-full mt-1.5'
           } ${align === 'right' ? 'right-0' : 'left-0'}`}
           style={{
@@ -176,14 +176,14 @@ export function LiveSpeedBadge({
               {breakdown.items.map((item) => (
                 <div
                   key={`${item.provider_id}::${item.model_id}`}
-                  className="flex items-center justify-between gap-2 tabular-nums"
+                  className="flex items-center justify-between gap-3 tabular-nums"
                 >
                   <div className="flex items-center gap-1.5 min-w-0">
                     <span
                       className="inline-block w-1.5 h-1.5 rounded-full shrink-0"
                       style={{ backgroundColor: providerAccentColor(item.provider_id) }}
                     />
-                    <span className="truncate font-medium" style={{ color: 'var(--text-primary)' }}>
+                    <span className="font-medium break-all" style={{ color: 'var(--text-primary)' }}>
                       {item.model_id}
                     </span>
                     <span

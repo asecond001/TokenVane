@@ -574,7 +574,7 @@ export function DataSourcesPage() {
                             border: '1px solid var(--border-subtle)',
                           }}
                         >
-                          <code className="select-text truncate">{customPath}</code>
+                          <code className="select-text truncate" title={customPath}>{customPath}</code>
                           <button
                             type="button"
                             onClick={() => handleRemoveCustomPath(cfg, customPath)}

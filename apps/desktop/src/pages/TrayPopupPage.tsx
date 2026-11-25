@@ -216,10 +216,10 @@ export function TrayPopupPage() {
                     }}
                   />
                   <div className="min-w-0">
-                    <div className="text-[11px] font-medium truncate">
+                    <div className="text-[11px] font-medium truncate" title={formatSessionDisplayName(session)}>
                       {formatSessionDisplayName(session)}
                     </div>
-                    <div className="text-[10px] truncate" style={{ color: 'var(--text-muted)' }}>
+                    <div className="text-[10px] truncate" style={{ color: 'var(--text-muted)' }} title={session.model_id}>
                       {providerDisplayName(session.provider_id)} · {session.model_id} ·{' '}
                       {formatRelativeTime(session.last_active_at_ms)}
                     </div>

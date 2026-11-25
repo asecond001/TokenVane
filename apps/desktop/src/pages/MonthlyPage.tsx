@@ -638,7 +638,7 @@ export function MonthlyPage() {
                   return (
                     <div key={share.key} className="space-y-1 text-[11.5px] tabular-nums">
                       <div className="flex items-center justify-between gap-2">
-                        <span className="font-mono truncate" style={{ color: 'var(--text-primary)' }}>
+                        <span className="font-mono truncate" style={{ color: 'var(--text-primary)' }} title={share.label}>
                           {share.label}
                         </span>
                         <span className="shrink-0" style={{ color: 'var(--text-secondary)' }}>

@@ -545,7 +545,11 @@ export function SpeedLatencyPage({ embedded = false }: SpeedLatencyPageProps = {
                   ? formatTps(summaryStats.fastestModel.p95_tps)
                   : '—'}
               </div>
-              <div className="mt-0.5 text-[11px] truncate" style={{ color: 'var(--text-muted)' }}>
+              <div
+                className="mt-0.5 text-[11px] truncate"
+                style={{ color: 'var(--text-muted)' }}
+                title={summaryStats.fastestModel?.model_id}
+              >
                 {summaryStats.fastestModel ? summaryStats.fastestModel.model_id : '等待模型样本'}
               </div>
             </div>

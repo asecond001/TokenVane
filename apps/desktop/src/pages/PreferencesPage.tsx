@@ -1081,6 +1081,7 @@ export function PreferencesPage({
                   <div
                     className="text-[12px] truncate"
                     style={{ color: 'var(--text-primary)' }}
+                    title={bgImagePath || undefined}
                   >
                     {bgImagePath ? `当前壁纸：${bgImagePath}` : '可选择本地壁纸图片'}
                   </div>

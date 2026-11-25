@@ -441,7 +441,7 @@ export function OverviewPage() {
             {(data?.top_model_shares ?? []).slice(0, 3).map((model) => (
               <div key={model.key} className="space-y-1 text-[11px] tabular-nums">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="font-mono truncate" style={{ color: 'var(--text-primary)' }}>
+                  <span className="font-mono truncate" style={{ color: 'var(--text-primary)' }} title={model.label}>
                     {model.label}
                   </span>
                   <span className="shrink-0" style={{ color: 'var(--text-muted)' }}>
@@ -532,7 +532,7 @@ export function OverviewPage() {
                       />
                       <div className="min-w-0">
                         <div className="flex items-center gap-2 min-w-0">
-                          <span className="font-medium truncate">
+                          <span className="font-medium truncate" title={formatSessionDisplayName(session)}>
                             {formatSessionDisplayName(session)}
                           </span>
                           <span
@@ -553,13 +553,13 @@ export function OverviewPage() {
                           className="text-[11px] flex items-center gap-2 truncate tabular-nums"
                           style={{ color: 'var(--text-muted)' }}
                         >
-                          <span className="truncate">
+                          <span className="truncate" title={session.model_id}>
                             {providerDisplayName(session.provider_id)} · {session.model_id}
                           </span>
                           {session.project_label && (
                             <>
                               <span>·</span>
-                              <span className="truncate">{session.project_label}</span>
+                              <span className="truncate" title={session.project_label}>{session.project_label}</span>
                             </>
                           )}
                           <span>·</span>
@@ -751,6 +751,7 @@ export function OverviewPage() {
                       <div
                         className="text-[10.5px] truncate max-w-[160px]"
                         style={{ color: 'var(--accent-rose)' }}
+                        title={row.last_error}
                       >
                         {row.last_error}
                       </div>

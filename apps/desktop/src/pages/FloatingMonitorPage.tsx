@@ -434,9 +434,13 @@ export function FloatingMonitorPage({ livePulseSeq = 0 }: FloatingMonitorPagePro
                   className="row-interactive w-full text-left px-1 py-0.5 rounded-lg flex items-center justify-between gap-2 cursor-pointer"
                 >
                   <div className="min-w-0 flex-1">
-                    <div className="text-[11px] font-medium truncate">{formatSessionDisplayName(sess)}</div>
+                    <div className="text-[11px] font-medium truncate" title={formatSessionDisplayName(sess)}>{formatSessionDisplayName(sess)}</div>
                     {!isShort && (
-                      <div className="text-[10px] truncate" style={{ color: 'var(--text-muted)' }}>
+                      <div
+                        className="text-[10px] truncate"
+                        style={{ color: 'var(--text-muted)' }}
+                        title={`${providerDisplayName(sess.provider_id)} · ${sess.model_id}`}
+                      >
                         {providerDisplayName(sess.provider_id)} · {sess.model_id}
                       </div>
                     )}
@@ -798,7 +802,11 @@ function ShareRow({
   return (
     <div className="space-y-0.5">
       <div className="flex items-center justify-between gap-2 text-[10.5px] tabular-nums">
-        <span className={`truncate ${mono ? 'font-mono' : ''}`} style={{ color: 'var(--text-secondary)' }}>
+        <span
+          className={`truncate ${mono ? 'font-mono' : ''}`}
+          style={{ color: 'var(--text-secondary)' }}
+          title={label}
+        >
           {label}
         </span>
         <span className="shrink-0" style={{ color: 'var(--text-primary)' }}>

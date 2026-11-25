@@ -232,7 +232,11 @@ function ComparisonView() {
               {item.label}
             </div>
             <div className="mt-1 text-[17px] font-semibold tabular-nums truncate">{item.value}</div>
-            <div className="mt-0.5 text-[11px] truncate font-mono" style={{ color: 'var(--text-muted)' }}>
+            <div
+              className="mt-0.5 text-[11px] truncate font-mono"
+              style={{ color: 'var(--text-muted)' }}
+              title={item.row?.model_id}
+            >
               {item.row ? item.row.model_id : '—'}
             </div>
           </div>

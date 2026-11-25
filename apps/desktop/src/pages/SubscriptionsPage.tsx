@@ -1064,7 +1064,7 @@ export function SubscriptionsPage() {
                             <div key={w.window_id} className="space-y-1">
                               <div className="flex items-center justify-between gap-2 text-[12px] tabular-nums">
                                 <div className="flex items-center gap-2 min-w-0">
-                                  <span className="font-medium truncate">{w.label}</span>
+                                  <span className="font-medium truncate" title={w.label}>{w.label}</span>
                                   <span
                                     className="px-1.5 py-0.5 text-[10px] rounded-md shrink-0"
                                     style={{
